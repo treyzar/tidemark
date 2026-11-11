@@ -120,6 +120,15 @@ pub fn search(items: &[Item], query: &str, limit: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Files that run code when opened. Found in user folders (Downloads!),
+/// they are revealed in Explorer instead of being started from the search.
+pub fn is_executable(name: &str) -> bool {
+    const EXT: [&str; 20] = [
+        "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "msi", "msp", "scr", "pif", "lnk", "url", "cpl",
+    ];
+    name.rsplit_once('.').is_some_and(|(_, ext)| EXT.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
 /// A tiny calculator: + - * / % ^ and parentheses, "," as decimal point.
 pub fn calc(input: &str) -> Option<f64> {
     let s: Vec<char> = input.replace(',', ".").chars().filter(|c| !c.is_whitespace()).collect();
@@ -364,6 +373,16 @@ mod tests {
         assert_eq!(search(&items, "chrome", 5)[0], 1);
         // Wrong-layout text buried inside a word is not a match.
         assert!(search(&items, "отч", 5).is_empty());
+    }
+
+    #[test]
+    fn executables_are_recognized() {
+        for n in ["Telegram.exe", "setup.MSI", "run.bat", "x.ps1", "a.js", "Ярлык.lnk"] {
+            assert!(is_executable(n), "{n}");
+        }
+        for n in ["Отчёт.docx", "photo.png", "archive.zip", "noext", "notes.txt"] {
+            assert!(!is_executable(n), "{n}");
+        }
     }
 
     #[test]

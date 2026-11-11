@@ -198,6 +198,8 @@ pub enum Hit {
     /// Remove reminder row `n`.
     RemindRemove(usize),
     SearchField,
+    /// File `n` on the shelf.
+    ShelfRow(usize),
     /// Search result `n`.
     SearchRow(usize),
 }
@@ -208,11 +210,12 @@ pub enum Tab {
     Home,
     Clipboard,
     Notes,
+    Shelf,
     /// Alt+Space search; not in the tab row.
     Search,
 }
 
-pub const TABS: [Tab; 3] = [Tab::Home, Tab::Clipboard, Tab::Notes];
+pub const TABS: [Tab; 4] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -220,6 +223,7 @@ impl Tab {
             Tab::Home => "Главная",
             Tab::Clipboard => "Буфер",
             Tab::Notes => "Заметки",
+            Tab::Shelf => "Полка",
             Tab::Search => "Поиск",
         }
     }
@@ -480,7 +484,7 @@ mod tests {
     #[test]
     fn tabs_and_pages_fit() {
         let tabs = tab_buttons(Tab::Notes);
-        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs.len(), 4);
         assert_eq!(tabs[2].1.w, 100.0);
         let r = notes_regions(560.0);
         assert!(r.note_card.x + r.note_card.w < r.timer_card.x);

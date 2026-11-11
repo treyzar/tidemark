@@ -81,6 +81,8 @@ pub struct Scene<'a> {
     /// Rows of the Clipboard tab.
     pub clip_page: &'a [ClipRow],
     pub search: Option<&'a SearchView>,
+    /// Files on the shelf (glyph, name, folder).
+    pub shelf: &'a [ClipRow],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +235,7 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    shelf: Vec<ClipRow>,
     search: Option<SearchView>,
     tab: Tab,
     notes: Option<NotesView>,
@@ -1367,6 +1370,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            shelf: if scene.tab == Tab::Shelf { scene.shelf.to_vec() } else { Vec::new() },
             search: if scene.tab == Tab::Search { scene.search.cloned() } else { None },
             tab: scene.tab,
             notes: if scene.tab == Tab::Notes { scene.notes.cloned() } else { None },
@@ -1410,7 +1414,8 @@ impl Renderer {
         match scene.tab {
             Tab::Search => {}
             Tab::Home => self.paint_tiles(scene),
-            Tab::Clipboard => self.paint_clip_page(scene),
+            Tab::Clipboard => self.paint_list(scene, scene.clip_page, Hit::Clip, "История пуста — скопируйте что-нибудь"),
+            Tab::Shelf => self.paint_list(scene, scene.shelf, Hit::ShelfRow, "Перетащите файлы на остров — они полежат здесь"),
             Tab::Notes => {
                 if let Some(n) = scene.notes {
                     self.paint_notes(scene, n);
@@ -1450,6 +1455,15 @@ impl Renderer {
                     self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy - 4.0 * k }, 1.0 * k);
                 }
                 Tab::Search => {}
+                Tab::Shelf => {
+                    // An open tray.
+                    self.line(ink, cx - 6.0 * k, cy - 1.0 * k, cx - 6.0 * k, cy + 5.0 * k, 1.5 * k);
+                    self.line(ink, cx - 6.0 * k, cy + 5.0 * k, cx + 6.0 * k, cy + 5.0 * k, 1.5 * k);
+                    self.line(ink, cx + 6.0 * k, cy + 5.0 * k, cx + 6.0 * k, cy - 1.0 * k, 1.5 * k);
+                    self.line(ink, cx, cy - 6.0 * k, cx, cy + 1.5 * k, 1.5 * k);
+                    self.line(ink, cx - 3.0 * k, cy - 1.5 * k, cx, cy + 1.5 * k, 1.5 * k);
+                    self.line(ink, cx + 3.0 * k, cy - 1.5 * k, cx, cy + 1.5 * k, 1.5 * k);
+                }
                 Tab::Notes => {
                     for (i, w) in [9.0, 9.0, 6.0].iter().enumerate() {
                         let y = cy - 4.0 * k + i as f32 * 4.0 * k;
@@ -1664,24 +1678,25 @@ impl Renderer {
         }
     }
 
-    fn paint_clip_page(&self, scene: &Scene) {
+    /// A page of rows (Clipboard tab, Shelf tab).
+    fn paint_list(&self, scene: &Scene, list: &[ClipRow], hit: fn(usize) -> Hit, empty: &str) {
         let fonts = self.fonts.as_ref().unwrap();
         let (k, th) = (scene.scale, scene.theme);
         let w = scene.panel_size.0;
-        if scene.clip_page.is_empty() {
+        if list.is_empty() {
             let area = Rect { x: layout::PAD, y: layout::TAB_BAR_H, w: w - 2.0 * layout::PAD, h: layout::PAGE_H - layout::PAD };
             unsafe {
                 self.brush.SetColor(&color(th.subtext, 1.0));
-                let s: Vec<u16> = "История пуста — скопируйте что-нибудь".encode_utf16().collect();
+                let s: Vec<u16> = empty.encode_utf16().collect();
                 let r = D2D_RECT_F { left: area.x * k, top: area.y * k, right: (area.x + area.w) * k, bottom: (area.y + area.h) * k };
                 self.dc.DrawText(&s, &fonts.lyric, &r, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             }
             return;
         }
-        for (i, (row, slot)) in scene.clip_page.iter().zip(layout::clip_page_rows()).enumerate() {
+        for (i, (row, slot)) in list.iter().zip(layout::clip_page_rows()).enumerate() {
             let rc = Rect { w: w - 2.0 * layout::PAD, ..slot };
             let r = D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
-            self.fill_rect(if scene.hot == Some(Hit::Clip(i)) { th.tile_hover } else { th.tile }, r, 10.0 * k);
+            self.fill_rect(if scene.hot == Some(hit(i)) { th.tile_hover } else { th.tile }, r, 10.0 * k);
             let cy = (r.top + r.bottom) / 2.0;
             self.paint_glyph(row.glyph, r.left + 18.0 * k, cy, k * 0.9, th);
             unsafe {

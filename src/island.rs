@@ -18,6 +18,7 @@ use crate::notes::{self, Reminder};
 use crate::textinput::TextField;
 use crate::timer::{self, Timer};
 use crate::fullscreen::{self, ABN_FULLSCREENAPP, WM_APPBAR, WM_FOREGROUND};
+use crate::shelf::{self, WM_SHELF_DRAG, WM_SHELF_DROP};
 use crate::{clipboard, dock};
 use crate::media::{self, Command, MediaState, WM_MEDIA};
 use crate::lyrics::{self, Lines, WM_LYRICS};
@@ -203,6 +204,11 @@ pub struct Island {
     search_view: Option<SearchView>,
     /// Tab to go back to when the search closes.
     tab_before_search: Tab,
+    shelf: Vec<String>,
+    shelf_rows: Vec<ClipRow>,
+    shelf_target: Option<shelf::Target>,
+    /// Shelf row pressed at (x, y): becomes a drag-out once the cursor moves.
+    shelf_press: Option<(usize, i32, i32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +354,10 @@ pub fn create(cfg: Config) -> Result<HWND> {
             search_sel: 0,
             search_view: None,
             tab_before_search: Tab::Home,
+            shelf: shelf::load(),
+            shelf_rows: Vec::new(),
+            shelf_target: None,
+            shelf_press: None,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -356,6 +366,8 @@ pub fn create(cfg: Config) -> Result<HWND> {
             island.cfg.save();
         }
         island.load_dock();
+        island.refresh_shelf_rows();
+        island.shelf_target = shelf::Target::register(hwnd);
         island.signals = Some(Signals::start(hwnd));
         if island.cfg.privacy_indicator {
             island.privacy = privacy::Watcher::start(hwnd);
@@ -836,6 +848,14 @@ impl Island {
                     .position(|r| Rect { w, ..*r }.contains(dx, dy))
                     .map(Hit::Clip);
             }
+            Tab::Shelf => {
+                let w = self.cfg.expanded_width - 2.0 * layout::PAD;
+                return layout::clip_page_rows()
+                    .iter()
+                    .take(self.shelf_rows.len())
+                    .position(|r| Rect { w, ..*r }.contains(dx, dy))
+                    .map(Hit::ShelfRow);
+            }
             Tab::Notes => {
                 let r = layout::notes_regions(self.cfg.expanded_width);
                 if r.toggle.contains(dx, dy) {
@@ -918,6 +938,11 @@ impl Island {
             Some(Hit::NoteField) => self.set_focus(Focus::Note),
             Some(Hit::SearchField) => self.set_focus(Focus::Search),
             Some(Hit::SearchRow(i)) => self.open_hit(i, false),
+            Some(Hit::ShelfRow(i)) => {
+                // Open on release unless it turns into a drag.
+                self.shelf_press = Some((i, x, y));
+                return true;
+            }
             Some(Hit::RemindField) => self.set_focus(Focus::Remind),
             Some(Hit::TimerPreset(i)) => {
                 self.timer.start(Duration::from_secs(layout::TIMER_PRESETS[i]), Instant::now());
@@ -1233,6 +1258,7 @@ impl Island {
                         launcher::Kind::App => "Приложение".to_string(),
                         launcher::Kind::Recent => "Недавнее".to_string(),
                         launcher::Kind::Folder => "Папка".to_string(),
+                        launcher::Kind::File if launcher::is_executable(&it.name) => "Программа · покажу в папке".to_string(),
                         launcher::Kind::File => std::path::Path::new(&it.path)
                             .parent()
                             .and_then(|p| p.file_name())
@@ -1263,7 +1289,10 @@ impl Island {
         let Some(hit) = self.search_hits.get(i).cloned() else { return };
         match hit {
             SearchHit::Item(it) => {
-                if ctrl && matches!(it.kind, launcher::Kind::File | launcher::Kind::Folder) {
+                // Programs found in user folders are shown, never started from
+                // here: a downloaded "Telegram.exe" must not run on Enter.
+                let reveal = ctrl || (it.kind == launcher::Kind::File && launcher::is_executable(&it.name));
+                if reveal && matches!(it.kind, launcher::Kind::File | launcher::Kind::Folder) {
                     unsafe {
                         let _ = AllowSetForegroundWindow(ASFW_ANY);
                         windows::Win32::UI::Shell::ShellExecuteW(
@@ -1288,6 +1317,76 @@ impl Island {
             }
         }
         self.close_search();
+    }
+
+    fn refresh_shelf_rows(&mut self) {
+        let rows: Vec<ClipRow> = self
+            .shelf
+            .iter()
+            .map(|p| {
+                let path = std::path::Path::new(p);
+                let name = path.file_name().map_or(p.clone(), |n| n.to_string_lossy().into_owned());
+                let lower = name.to_lowercase();
+                let glyph = if path.is_dir() {
+                    clip_history::Glyph::Files
+                } else if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"].iter().any(|e| lower.ends_with(e)) {
+                    clip_history::Glyph::Image
+                } else {
+                    clip_history::Glyph::Text
+                };
+                let folder = if path.exists() {
+                    path.parent().and_then(|d| d.file_name()).map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                } else {
+                    "нет файла".to_string()
+                };
+                ClipRow { glyph, text: name, ago: folder }
+            })
+            .collect();
+        if rows != self.shelf_rows {
+            self.shelf_rows = rows;
+            self.dirty = true;
+        }
+    }
+
+    /// Files are being dragged over the island: open it on the shelf.
+    fn shelf_drag(&mut self, over: bool) {
+        if over {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_COLLAPSE);
+            }
+            if self.tab != Tab::Shelf {
+                self.set_focus(Focus::None);
+                self.tab = Tab::Shelf;
+                self.panel_height = self.tab_height(Tab::Shelf);
+                self.dirty = true;
+            }
+            if self.hovered {
+                self.height.target = self.panel_height;
+                self.last_frame = None;
+            } else {
+                self.set_hover(true);
+            }
+        } else {
+            // OLE owns the mouse during a drag, so no WM_MOUSELEAVE comes.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_COLLAPSE, 1200, None);
+            }
+        }
+    }
+
+    fn shelf_dropped(&mut self) {
+        let Some(files) = self.shelf_target.as_ref().map(|t| t.take()) else { return };
+        if files.is_empty() {
+            return;
+        }
+        shelf::add(&mut self.shelf, &files);
+        shelf::save(&self.shelf);
+        self.refresh_shelf_rows();
+        self.wobble.velocity += 60.0;
+        self.last_frame = None;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_COLLAPSE, 1500, None);
+        }
     }
 
     fn since_midnight() -> u64 {
@@ -1515,6 +1614,7 @@ impl Island {
         let items: &[(usize, PCWSTR)] = match hit {
             Some(Hit::Clip(_)) => &[(MENU_REMOVE, w!("Удалить из истории")), (MENU_CLEAR, w!("Очистить историю"))],
             Some(Hit::Dock(_)) => &[(MENU_REMOVE, w!("Убрать из дока"))],
+            Some(Hit::ShelfRow(_)) => &[(MENU_REMOVE, w!("Убрать с полки")), (MENU_CLEAR, w!("Очистить полку"))],
             _ => return,
         };
         let cmd = unsafe {
@@ -1546,6 +1646,18 @@ impl Island {
                 }
                 self.history.save();
                 self.refresh_clip_rows();
+            }
+            (Some(Hit::ShelfRow(i)), MENU_REMOVE) => {
+                if i < self.shelf.len() {
+                    self.shelf.remove(i);
+                }
+                shelf::save(&self.shelf);
+                self.refresh_shelf_rows();
+            }
+            (Some(Hit::ShelfRow(_)), MENU_CLEAR) => {
+                self.shelf.clear();
+                shelf::save(&self.shelf);
+                self.refresh_shelf_rows();
             }
             (Some(Hit::Dock(i)), MENU_REMOVE) => {
                 if let (Some(app), Some(list)) = (self.dock_apps.get(i), self.cfg.dock_apps.as_mut()) {
@@ -1922,6 +2034,7 @@ impl Island {
             notes: self.notes_view.as_ref(),
             clip_page: &self.clip_page,
             search: self.search_view.as_ref(),
+            shelf: &self.shelf_rows,
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -2060,6 +2173,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = TrackMouseEvent(&mut tme);
             }
             let (x, y) = mouse_pos(lparam);
+            let drag = with_island(|i| match i.shelf_press {
+                Some((row, px, py)) if (x - px).abs() > 6 || (y - py).abs() > 6 => {
+                    i.shelf_press = None;
+                    i.shelf.get(row).cloned()
+                }
+                _ => None,
+            })
+            .flatten();
+            if let Some(path) = drag {
+                let _ = ReleaseCapture();
+                shelf::drag_out(&path);
+                return LRESULT(0);
+            }
             with_island(|i| {
                 if i.dragging_volume {
                     i.drag_volume(x, false);
@@ -2150,6 +2276,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONUP => {
             let (x, y) = mouse_pos(lparam);
+            if let Some(path) = with_island(|i| i.shelf_press.take().and_then(|(row, _, _)| i.shelf.get(row).cloned())).flatten() {
+                let _ = ReleaseCapture();
+                dock::launch(&path);
+                return LRESULT(0);
+            }
             let was_dragging = with_island(|i| {
                 let was = i.dragging_volume;
                 if was {
@@ -2308,6 +2439,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| if i.tab == Tab::Search { i.close_search() } else { i.open_search() });
             return LRESULT(0);
         }
+        WM_SHELF_DRAG => {
+            let over = wparam.0 == 1;
+            with_island(|i| i.shelf_drag(over));
+            return LRESULT(0);
+        }
+        WM_SHELF_DROP => {
+            with_island(|i| i.shelf_dropped());
+            return LRESULT(0);
+        }
         WM_INDEX => {
             with_island(|i| {
                 if i.tab == Tab::Search {
@@ -2351,6 +2491,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             clipboard::stop_listening(hwnd);
+            with_island(|i| i.shelf_target = None);
             with_island(|i| i.save_note());
             with_island(|i| {
                 if let Some(mut s) = i.signals.take() {

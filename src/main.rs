@@ -20,6 +20,7 @@ mod media;
 mod notes;
 mod privacy;
 mod render;
+mod shelf;
 mod signals;
 mod stats;
 mod textinput;
@@ -42,8 +43,9 @@ fn main() {
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        // Shell icons, the file picker and WIC need COM on the UI thread.
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        // Shell icons, the file picker, WIC and drag-and-drop need OLE
+        // (an STA) on the UI thread.
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
 
     let cfg = config::Config::load();
