@@ -11,11 +11,13 @@ const HOOK =
   process.env.WIN_ISLAND_HOOK ??
   join(homedir(), "Documents", "win-island", "target", "release", "island-hook.exe")
 
-// Characters a card may show next to ✓ (same allowlist as island-hook,
-// which checks it again): printable ASCII, Latin-1, the Russian alphabet,
-// common punctuation. Everything else leaves only Терминал / Нет.
-const SHOWN_WHOLE = /^[\x20-\x7E¡-¬®-ÿЁА-яё‐-‧‰-⁞€№]*$/u
-const fitsIn = (s, max) => SHOWN_WHOLE.test(s) && s === s.trim() && [...s].length <= max
+// Characters a card may show next to ✓ (same rule as island-hook, which
+// checks it again): printable ASCII, the Russian alphabet, « » ° § € №,
+// and no word mixing Latin and Cyrillic letters. Everything else leaves
+// only Терминал / Нет.
+const SHOWN_WHOLE = /^[\x20-\x7E\u00A7\u00AB\u00B0\u00BB\u0401\u0410-\u044F\u0451\u20AC\u2116]*$/u
+const mixedScript = (s) => s.split(/[^\p{L}]/u).some((w) => /[A-Za-z]/.test(w) && /[\u0400-\u04FF]/.test(w))
+const fitsIn = (s, max) => SHOWN_WHOLE.test(s) && !mixedScript(s) && s === s.trim() && [...s].length <= max
 
 /** Sends one message to the island; resolves to the pressed button or null. */
 function island(msg, waitSeconds = 50) {

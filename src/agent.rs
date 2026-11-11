@@ -34,10 +34,15 @@ pub fn pipe_name() -> String {
     format!(r"\\.\pipe\win-island-agent-{user}")
 }
 
-/// Any character outside the card allowlist (same as island-hook's):
-/// printable ASCII, Latin-1, the Russian alphabet, common punctuation.
+/// Not drawn as what it is (same rule as island-hook): a character
+/// outside printable ASCII, the Russian alphabet and « » ° § € №, or a
+/// word mixing Latin and Cyrillic letters.
 pub fn has_hidden(text: &str) -> bool {
-    !text.chars().all(|c| matches!(c as u32, 0x20..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF | 0x401 | 0x410..=0x44F | 0x451 | 0x2010..=0x2027 | 0x2030..=0x205E | 0x20AC | 0x2116))
+    let allowed = |c: char| matches!(c as u32, 0x20..=0x7E | 0xA7 | 0xAB | 0xB0 | 0xBB | 0x401 | 0x410..=0x44F | 0x451 | 0x20AC | 0x2116);
+    let mixed = text
+        .split(|c: char| !c.is_alphabetic())
+        .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && w.chars().any(|c| matches!(c as u32, 0x400..=0x4FF)));
+    !text.chars().all(allowed) || mixed
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -208,6 +213,9 @@ mod tests {
         assert!(has_hidden("a\u{202E}b"));
         assert!(has_hidden("a\u{2028}b"));
         assert!(has_hidden("a\nb"));
+        assert!(has_hidden("pаypal")); // Cyrillic а
+        assert!(has_hidden("a\u{2014}b"));
+        assert!(!has_hidden("Проект win-island «ok»"));
     }
 
     #[test]

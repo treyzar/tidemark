@@ -156,18 +156,25 @@ fn describe_tool(tool: &str, input: &Value, cwd: &str) -> (String, String, bool)
 /// Shown whole: `short(text, max)` leaves it as is, and every character is
 /// one that draws as what it is.
 fn fits_in(text: &str, max: usize) -> bool {
-    short(text, max) == text && text.chars().all(allowed_char)
+    short(text, max) == text && text.chars().all(allowed_char) && !mixed_script(text)
 }
 
 fn fits(text: &str) -> bool {
     fits_in(text, TEXT_MAX)
 }
 
-/// Characters a card may show next to ✓: printable ASCII, Latin-1,
-/// the Russian alphabet and common punctuation. An allowlist, so invisible,
-/// bidi, combining and look-alike characters from elsewhere never pass.
+/// Characters a card may show next to ✓: printable ASCII, the Russian
+/// alphabet and « » ° § € №. An allowlist, so invisible, bidi, combining
+/// and ASCII look-alike characters (dashes, dots, quotes) never pass.
 fn allowed_char(c: char) -> bool {
-    matches!(c as u32, 0x20..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF | 0x401 | 0x410..=0x44F | 0x451 | 0x2010..=0x2027 | 0x2030..=0x205E | 0x20AC | 0x2116)
+    matches!(c as u32, 0x20..=0x7E | 0xA7 | 0xAB | 0xB0 | 0xBB | 0x401 | 0x410..=0x44F | 0x451 | 0x20AC | 0x2116)
+}
+
+/// A word mixing Latin and Cyrillic letters ("pаypal" with a Cyrillic а)
+/// reads as something it is not.
+fn mixed_script(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphabetic())
+        .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && w.chars().any(|c| matches!(c as u32, 0x400..=0x4FF)))
 }
 
 fn card(kind: &str, title: &str, text: &str, options: &[String]) -> Value {
@@ -364,6 +371,9 @@ mod tests {
         assert!(!fits("e\u{301}cho")); // combining mark
         assert!(!fits("ѕudo")); // Cyrillic dze: not in the Russian alphabet
         assert!(fits("Ёлка и ёж"));
+        assert!(fits("git commit -m «Готово»"));
+        assert!(!fits("curl https://pаypal.com")); // Cyrillic а inside a Latin word
+        assert!(!fits("rm \u{2013}rf x")); // en dash looks like -
         assert!(!fits(&"x".repeat(TEXT_MAX + 1)));
     }
 
