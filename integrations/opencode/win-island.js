@@ -40,12 +40,16 @@ export const WinIsland = async ({ directory }) => {
   return {
     "permission.ask": async (input, output) => {
       const pattern = Array.isArray(input.pattern) ? input.pattern.join(" ") : (input.pattern ?? "")
+      const text = where(pattern)
+      // ✓ only when the card shows all of it; "Терминал" leaves the
+      // question to opencode's own prompt.
+      const complete = pattern !== "" && !/[
+]/.test(text) && text.length <= 160
       const choice = await island({
         kind: "ask",
         title: input.title || "Разрешить?",
-        text: where(pattern),
-        // "Терминал" leaves the question to opencode's own prompt.
-        options: ["Терминал", "Нет", "✓"],
+        text,
+        options: complete ? ["Терминал", "Нет", "✓"] : ["Терминал", "Нет"],
       })
       if (choice === 2) output.status = "allow"
       else if (choice === 1) output.status = "deny"

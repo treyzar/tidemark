@@ -205,6 +205,9 @@ pub struct Island {
     /// A timer or reminder alarm waits in the pill until dismissed.
     alarm: Option<Alarm>,
     alarm_pulses: u32,
+    /// When the current alarm appeared: clicks right after a new agent card
+    /// (meant for the previous one) are ignored.
+    alarm_since: Instant,
     /// High surrogate of a character arriving in two WM_CHARs.
     pending_surrogate: Option<u16>,
     /// The user's window before a field took the keyboard; it gets the
@@ -255,6 +258,7 @@ struct AgentCard {
 /// Coding agents' notices and cards.
 const WM_AGENT: u32 = WM_APP + 18;
 const AGENT_TOAST_MS: u32 = 6000;
+const AGENT_CLICK_GUARD: Duration = Duration::from_millis(700);
 
 #[derive(Debug, Clone)]
 enum SearchHit {
@@ -396,6 +400,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             clip_page: Vec::new(),
             alarm: None,
             alarm_pulses: 0,
+            alarm_since: Instant::now(),
             pending_surrogate: None,
             prev_foreground: 0,
             index: launcher::Index::new(),
@@ -2040,6 +2045,7 @@ impl Island {
             }
         };
         self.alarm = Some(alarm);
+        self.alarm_since = Instant::now();
         if self.fullscreen {
             self.slide_in();
         }
@@ -2091,6 +2097,9 @@ impl Island {
     fn alarm_action(&mut self, i: usize) {
         let Some(alarm) = self.alarm.clone() else { return };
         if let Alarm::Agent(id) = alarm {
+            if self.alarm_since.elapsed() < AGENT_CLICK_GUARD {
+                return; // The card just changed under the cursor.
+            }
             self.dismiss_alarm();
             if let Some(pos) = self.agent_cards.iter().position(|c| c.id == id) {
                 let card = self.agent_cards.remove(pos);

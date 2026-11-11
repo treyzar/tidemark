@@ -13,7 +13,11 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
+
+/// SecurityIdentification << 16 (std adds SECURITY_SQOS_PRESENT).
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -53,7 +57,10 @@ fn main() {
             notify(&msg);
             None
         }
-        Plan::Permission(msg) => permission_answer(ask(&msg, wait)),
+        Plan::Permission(msg) => {
+            let choice = ask(&msg, wait);
+            permission_answer(choice.and_then(|i| msg["options"].get(i)).and_then(Value::as_str))
+        }
         Plan::Question { msg, questions, question, labels } => question_answer(ask(&msg, wait), &questions, &question, &labels),
     };
     if let Some(out) = out {
@@ -73,6 +80,10 @@ enum Plan {
 }
 
 const PERMISSION_OPTIONS: [&str; 3] = ["Терминал", "Нет", "✓"];
+/// When the card cannot show everything that would be allowed.
+const PERMISSION_OPTIONS_PARTIAL: [&str; 2] = ["Терминал", "Нет"];
+/// The card's second line holds this many characters.
+const TEXT_MAX: usize = 160;
 
 fn project(event: &Value) -> String {
     let cwd = event["cwd"].as_str().unwrap_or_default().trim_end_matches(['\\', '/']);
@@ -90,31 +101,47 @@ fn short(s: &str, max: usize) -> String {
     }
 }
 
-fn file_name(p: &str) -> String {
-    p.rsplit(['\\', '/']).next().unwrap_or(p).to_string()
+/// A path relative to the project, or the full path outside it.
+fn shown_path(p: &str, cwd: &str) -> String {
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let (np, nc) = (norm(p), norm(cwd));
+    if !nc.is_empty() && np.starts_with(&format!("{nc}/")) {
+        p[nc.len() + 1..].to_string()
+    } else {
+        p.to_string()
+    }
 }
 
-/// "Выполнить команду?" + what exactly.
-fn describe_tool(tool: &str, input: &Value) -> (String, String) {
+/// "Выполнить команду?" + what exactly, and whether that is everything
+/// the permission covers (false: arguments the card does not show).
+fn describe_tool(tool: &str, input: &Value, cwd: &str) -> (String, String, bool) {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
     match tool {
-        "Bash" | "PowerShell" => ("Выполнить команду?".into(), s("command")),
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("Изменить файл?".into(), file_name(&s("file_path")).to_string() + &file_name(&s("notebook_path"))),
-        "Read" => ("Прочитать файл?".into(), file_name(&s("file_path"))),
-        "WebFetch" => ("Открыть страницу?".into(), s("url")),
-        "WebSearch" => ("Искать в сети?".into(), s("query")),
+        "Bash" | "PowerShell" => ("Выполнить команду?".into(), s("command"), true),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => {
+            let path = if s("file_path").is_empty() { s("notebook_path") } else { s("file_path") };
+            ("Изменить файл?".into(), shown_path(&path, cwd), true)
+        }
+        "Read" => ("Прочитать файл?".into(), shown_path(&s("file_path"), cwd), true),
+        "WebFetch" => ("Открыть страницу?".into(), s("url"), true),
+        "WebSearch" => ("Искать в сети?".into(), s("query"), true),
         t if t.starts_with("mcp__") => {
             let mut parts = t.splitn(3, "__").skip(1);
             let server = parts.next().unwrap_or_default();
             let name = parts.next().unwrap_or_default();
-            (format!("Инструмент {}?", short(name, 28)), server.to_string())
+            (format!("Инструмент {}?", short(name, 28)), server.to_string(), false)
         }
-        t => (format!("Разрешить {}?", short(t, 28)), short(&input.to_string(), 120)),
+        t => (format!("Разрешить {}?", short(t, 28)), input.to_string(), false),
     }
 }
 
+/// Fits the card's second line in full: one line, not cut.
+fn fits(text: &str) -> bool {
+    !text.contains(['\n', '\r']) && text.trim().chars().count() <= TEXT_MAX
+}
+
 fn card(kind: &str, title: &str, text: &str, options: &[String]) -> Value {
-    json!({ "kind": kind, "source": "Claude", "title": short(title, 80), "text": short(text, 160), "options": options })
+    json!({ "kind": kind, "source": "Claude", "title": short(title, 80), "text": short(text, TEXT_MAX), "options": options })
 }
 
 fn plan(event: &Value) -> Option<Plan> {
@@ -126,9 +153,13 @@ fn plan(event: &Value) -> Option<Plan> {
             if tool == "AskUserQuestion" || tool == "ExitPlanMode" {
                 return None; // Those are not yes/no questions.
             }
-            let (title, detail) = describe_tool(tool, &event["tool_input"]);
-            let options: Vec<String> = PERMISSION_OPTIONS.iter().map(|s| s.to_string()).collect();
-            Some(Plan::Permission(card("ask", &title, &with_project(&detail), &options)))
+            let (title, detail, complete) = describe_tool(tool, &event["tool_input"], event["cwd"].as_str().unwrap_or_default());
+            let text = with_project(&detail);
+            // ✓ only when the card shows everything it would allow; a
+            // multi-line or cut command can be refused or left to the terminal.
+            let options: &[&str] = if complete && fits(&text) { &PERMISSION_OPTIONS } else { &PERMISSION_OPTIONS_PARTIAL };
+            let options: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+            Some(Plan::Permission(card("ask", &title, &text, &options)))
         }
         "PreToolUse" if event["tool_name"] == "AskUserQuestion" => {
             let questions = event["tool_input"]["questions"].clone();
@@ -165,10 +196,11 @@ fn plan(event: &Value) -> Option<Plan> {
     }
 }
 
-fn permission_answer(choice: Option<usize>) -> Option<Value> {
-    let decision = match choice? {
-        2 => json!({ "behavior": "allow" }),
-        1 => json!({ "behavior": "deny", "message": "Пользователь запретил это в Win Island." }),
+/// The pressed button's label → the hook's decision.
+fn permission_answer(label: Option<&str>) -> Option<Value> {
+    let decision = match label? {
+        "✓" => json!({ "behavior": "allow" }),
+        "Нет" => json!({ "behavior": "deny", "message": "Пользователь запретил это в Win Island." }),
         _ => return None, // "Терминал": ask there.
     };
     Some(json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } }))
@@ -224,7 +256,8 @@ fn same_user(pipe: &File) -> bool {
 
 fn connect() -> Option<File> {
     for _ in 0..10 {
-        match OpenOptions::new().read(true).write(true).open(pipe_name()) {
+        // Identification level only: the server cannot act as this process.
+        match OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(pipe_name()) {
             Ok(f) => return same_user(&f).then_some(f),
             // All instances busy for a moment: the island makes another.
             Err(e) if e.raw_os_error() == Some(231) => std::thread::sleep(Duration::from_millis(50)),
@@ -268,21 +301,39 @@ mod tests {
 
     #[test]
     fn permission_card() {
-        let e = json!({"hook_event_name":"PermissionRequest","cwd":"C:\\Users\\ivan\\Documents\\win-island","tool_name":"Bash","tool_input":{"command":"cargo build --release\necho hi"}});
+        let e = json!({"hook_event_name":"PermissionRequest","cwd":"C:\\Users\\ivan\\Documents\\win-island","tool_name":"Bash","tool_input":{"command":"cargo build --release"}});
         let Some(Plan::Permission(msg)) = plan(&e) else { panic!() };
         assert_eq!(msg["title"], "Выполнить команду?");
         assert_eq!(msg["text"], "win-island: cargo build --release");
         assert_eq!(msg["options"].as_array().unwrap().len(), 3);
-        assert_eq!(permission_answer(Some(2)).unwrap()["hookSpecificOutput"]["decision"]["behavior"], "allow");
-        assert_eq!(permission_answer(Some(1)).unwrap()["hookSpecificOutput"]["decision"]["behavior"], "deny");
-        assert!(permission_answer(Some(0)).is_none());
+        assert_eq!(permission_answer(Some("✓")).unwrap()["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(permission_answer(Some("Нет")).unwrap()["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(permission_answer(Some("Терминал")).is_none());
         assert!(permission_answer(None).is_none());
+    }
+
+    /// Nothing can be allowed from the island that the card does not show.
+    #[test]
+    fn no_allow_for_hidden_parts() {
+        let partial = json!(["Терминал", "Нет"]);
+        let multi = json!({"hook_event_name":"PermissionRequest","cwd":"C:/p/demo","tool_name":"Bash","tool_input":{"command":"echo hi\nrm -rf ~"}});
+        let Some(Plan::Permission(m)) = plan(&multi) else { panic!() };
+        assert_eq!(m["options"], partial);
+        let long = json!({"hook_event_name":"PermissionRequest","cwd":"C:/p/demo","tool_name":"Bash","tool_input":{"command":"x".repeat(200)}});
+        let Some(Plan::Permission(m)) = plan(&long) else { panic!() };
+        assert_eq!(m["options"], partial);
+        let mcp = json!({"hook_event_name":"PermissionRequest","tool_name":"mcp__telegram__send_message","tool_input":{"text":"x"}});
+        let Some(Plan::Permission(m)) = plan(&mcp) else { panic!() };
+        assert_eq!(m["options"], partial);
+        let edit = json!({"hook_event_name":"PermissionRequest","cwd":"C:/p/demo","tool_name":"Edit","tool_input":{"file_path":"C:/Windows/System32/drivers/etc/hosts"}});
+        let Some(Plan::Permission(m)) = plan(&edit) else { panic!() };
+        assert_eq!(m["text"], "demo: C:/Windows/System32/drivers/etc/hosts");
     }
 
     #[test]
     fn tools_described() {
-        assert_eq!(describe_tool("Edit", &json!({"file_path":"C:/x/src/main.rs"})).1, "main.rs");
-        assert_eq!(describe_tool("mcp__telegram__send_message", &json!({})), ("Инструмент send_message?".to_string(), "telegram".to_string()));
+        assert_eq!(describe_tool("Edit", &json!({"file_path":"C:/x/src/main.rs"}), "C:\\x").1, "src/main.rs");
+        assert_eq!(describe_tool("mcp__telegram__send_message", &json!({}), ""), ("Инструмент send_message?".to_string(), "telegram".to_string(), false));
     }
 
     #[test]
