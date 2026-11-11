@@ -202,6 +202,9 @@ pub struct Island {
     alarm_pulses: u32,
     /// High surrogate of a character arriving in two WM_CHARs.
     pending_surrogate: Option<u16>,
+    /// The user's window before a field took the keyboard; it gets the
+    /// keyboard back when typing ends with Esc or Enter.
+    prev_foreground: isize,
     index: launcher::Index,
     search: TextField,
     search_hits: Vec<SearchHit>,
@@ -364,6 +367,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             alarm: None,
             alarm_pulses: 0,
             pending_surrogate: None,
+            prev_foreground: 0,
             index: launcher::Index::new(),
             search: TextField::new(false),
             search_hits: Vec::new(),
@@ -1095,6 +1099,18 @@ impl Island {
         if self.focus == Focus::Note {
             self.save_note();
         }
+        let was_typing = self.focus != Focus::None;
+        unsafe {
+            if !was_typing && focus != Focus::None {
+                let fg = GetForegroundWindow();
+                self.prev_foreground = if fg == self.hwnd { 0 } else { fg.0 as isize };
+            } else if was_typing && focus == Focus::None && GetForegroundWindow() == self.hwnd {
+                let prev = HWND(self.prev_foreground as *mut _);
+                if self.prev_foreground != 0 && IsWindow(Some(prev)).as_bool() {
+                    let _ = SetForegroundWindow(prev);
+                }
+            }
+        }
         self.focus = focus;
         self.refresh_text_view();
         if focus != Focus::None {
@@ -1570,20 +1586,11 @@ impl Island {
 
     fn text_op(&mut self, i: usize) {
         let op = text_tools::OPS[i];
-        let (start, end) = self.text.selection().unwrap_or((0, self.text.len()));
-        let part: String = self.text.text.chars().skip(start).take(end - start).collect();
-        match text_tools::apply(op, &part) {
-            Some(out) => {
-                let mut f = self.text.clone();
-                f.anchor = Some(start);
-                f.caret = end;
-                f.insert(&out);
-                f.anchor = Some(start);
-                self.text = f;
-                self.text_status = op.label().to_string();
-            }
-            None => self.text_status = format!("«{}» не подходит к этому тексту", op.label()),
-        }
+        self.text_status = if self.text.transform(|part| text_tools::apply(op, part)) {
+            op.label().to_string()
+        } else {
+            format!("«{}» не подходит к этому тексту", op.label())
+        };
         self.refresh_text_view();
     }
 
@@ -1998,7 +2005,8 @@ impl Island {
     fn set_active(&mut self, app: ActiveApp, announce: bool) {
         let switched = self.active.as_ref().is_none_or(|a| a.hwnd != app.hwnd);
         let icon = self.app_icon(&app.exe);
-        if announce && switched && self.cfg.show_active_app && !self.handle_mode() {
+        let other_notice = self.compact.toast.as_ref().is_some_and(|t| !matches!(t.badge, Badge::App(_)));
+        if announce && switched && self.cfg.show_active_app && !self.handle_mode() && !other_notice {
             let badge = icon.map_or(Badge::Glyph(clip_history::Glyph::Files), Badge::App);
             let text = if app.title != app.name { app.title.clone() } else { String::new() };
             self.show_toast(Toast { badge, title: app.name.clone(), text, level: None, actions: Vec::new() }, APP_TOAST_MS);

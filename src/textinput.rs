@@ -210,6 +210,19 @@ impl TextField {
         self.anchor = None;
     }
 
+    /// Replaces the selection (or all text when nothing is selected) with
+    /// `f(part)` and selects the result. False if `f` declines.
+    pub fn transform(&mut self, f: impl FnOnce(&str) -> Option<String>) -> bool {
+        let (start, end) = self.selection().unwrap_or((0, self.len()));
+        let part: String = self.text.chars().skip(start).take(end - start).collect();
+        let Some(out) = f(&part) else { return false };
+        let (bs, be) = (byte_at(&self.text, start), byte_at(&self.text, end));
+        self.text.replace_range(bs..be, &out);
+        self.anchor = Some(start);
+        self.caret = start + out.chars().count();
+        true
+    }
+
     /// Caret position as a UTF-16 index (what DirectWrite hit-testing uses).
     pub fn caret_utf16(&self) -> u32 {
         self.text.chars().take(self.caret).map(char::len_utf16).sum::<usize>() as u32
@@ -286,6 +299,24 @@ mod tests {
         f.vertical(false, false);
         f.vertical(false, false);
         assert_eq!(f.caret, 2);
+    }
+
+    #[test]
+    fn transform_whole_text_and_selection() {
+        let mut f = TextField::with_text("ghbdtn vbh", true);
+        assert!(f.transform(|t| Some(crate::launcher::swap_layout(t))));
+        assert_eq!(f.text, "привет мир");
+        assert_eq!(f.selection(), Some((0, 10)));
+        assert!(f.transform(|t| Some(t.to_uppercase())));
+        assert_eq!(f.text, "ПРИВЕТ МИР");
+        // Only the selected word changes.
+        let mut g = TextField::with_text("one two three", false);
+        g.anchor = Some(4);
+        g.caret = 7;
+        assert!(g.transform(|t| Some(t.to_uppercase())));
+        assert_eq!(g.text, "one TWO three");
+        assert!(!g.transform(|_| None));
+        assert_eq!(g.text, "one TWO three");
     }
 
     #[test]
