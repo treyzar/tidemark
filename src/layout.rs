@@ -207,6 +207,16 @@ pub enum Hit {
     TextOp(usize),
     TextTranslate,
     TextCopy,
+    /// Control tab: segment (Wi-Fi, Bluetooth, VPN).
+    CtlSegment(usize),
+    /// The action button of list row `n`.
+    CtlAction(usize),
+    CtlRefresh,
+    CtlSettings,
+    PasswordField,
+    PasswordGo,
+    /// Power button `n` of control::POWER.
+    Power(usize),
     /// Search result `n`.
     SearchRow(usize),
 }
@@ -219,11 +229,12 @@ pub enum Tab {
     Notes,
     Shelf,
     Text,
+    Control,
     /// Alt+Space search; not in the tab row.
     Search,
 }
 
-pub const TABS: [Tab; 5] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf, Tab::Text];
+pub const TABS: [Tab; 6] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf, Tab::Text, Tab::Control];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -233,6 +244,7 @@ impl Tab {
             Tab::Notes => "Заметки",
             Tab::Shelf => "Полка",
             Tab::Text => "Текст",
+            Tab::Control => "Управление",
             Tab::Search => "Поиск",
         }
     }
@@ -360,6 +372,48 @@ pub fn text_regions(width: f32) -> TextRegions {
         ops,
         translate: Rect { x: rx, y: top + 6.0 * 34.0 + 4.0, w: rw, h: 34.0 },
     }
+}
+
+pub const CTL_ROWS: usize = 5;
+
+/// Parts of the Control tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlRegions {
+    pub segments: Vec<Rect>,
+    pub refresh: Rect,
+    pub settings: Rect,
+    pub rows: Vec<Rect>,
+    pub actions: Vec<Rect>,
+    pub message: Rect,
+    pub power: Vec<Rect>,
+}
+
+pub fn control_regions(width: f32) -> ControlRegions {
+    let top = TAB_BAR_H;
+    let inner = width - 2.0 * PAD;
+    let segments = (0..3).map(|i| Rect { x: PAD + i as f32 * 96.0, y: top, w: 92.0, h: 28.0 }).collect();
+    let settings = Rect { x: width - PAD - 96.0, y: top, w: 96.0, h: 28.0 };
+    let refresh = Rect { x: settings.x - 34.0, y: top, w: 28.0, h: 28.0 };
+    let rows: Vec<Rect> = (0..CTL_ROWS).map(|i| Rect { x: PAD, y: top + 36.0 + i as f32 * 30.0, w: inner, h: 28.0 }).collect();
+    let actions = rows.iter().map(|r| Rect { x: r.x + r.w - 104.0, y: r.y + 2.0, w: 100.0, h: 24.0 }).collect();
+    let py = top + 36.0 + CTL_ROWS as f32 * 30.0 + 22.0;
+    let pw = (inner - 3.0 * GAP) / 4.0;
+    let power = (0..4).map(|i| Rect { x: PAD + i as f32 * (pw + GAP), y: py, w: pw, h: top + PAGE_H - PAD - py }).collect();
+    ControlRegions {
+        segments,
+        refresh,
+        settings,
+        rows,
+        actions,
+        message: Rect { x: PAD + 4.0, y: top + 36.0 + CTL_ROWS as f32 * 30.0 + 2.0, w: inner - 8.0, h: 16.0 },
+        power,
+    }
+}
+
+/// Password field and its button inside list row `r`.
+pub fn password_parts(r: &Rect) -> (Rect, Rect) {
+    let go = Rect { x: r.x + r.w - 76.0, y: r.y + 2.0, w: 72.0, h: 24.0 };
+    (Rect { x: r.x + r.w * 0.45, y: r.y + 2.0, w: go.x - 6.0 - (r.x + r.w * 0.45), h: 24.0 }, go)
 }
 
 /// Rows of the Clipboard tab.
@@ -535,7 +589,7 @@ mod tests {
     #[test]
     fn tabs_and_pages_fit() {
         let tabs = tab_buttons(Tab::Notes);
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 6);
         assert_eq!(tabs[2].1.w, 100.0);
         let r = notes_regions(560.0);
         assert!(r.note_card.x + r.note_card.w < r.timer_card.x);
@@ -560,6 +614,20 @@ mod tests {
         assert!(r.card.x + r.card.w < r.ops[0].x);
         assert!(r.translate.y + r.translate.h <= TAB_BAR_H + PAGE_H);
         assert!(r.ops[11].x + r.ops[11].w <= 560.0 - PAD + 0.01);
+    }
+
+    #[test]
+    fn control_page_fits() {
+        let r = control_regions(560.0);
+        assert!(r.refresh.x > r.segments[2].x + r.segments[2].w);
+        let last = r.rows.last().unwrap();
+        assert!(last.y + last.h < r.message.y + 0.01);
+        assert!(r.message.y + r.message.h <= r.power[0].y);
+        assert!(r.power[0].h >= 40.0);
+        assert!(r.power[3].x + r.power[3].w <= 560.0 - PAD + 0.01);
+        assert!(r.power[0].y + r.power[0].h <= TAB_BAR_H + PAGE_H);
+        let (field, go) = password_parts(&r.rows[0]);
+        assert!(field.x + field.w < go.x);
     }
 
     #[test]

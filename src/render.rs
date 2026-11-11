@@ -84,6 +84,41 @@ pub struct Scene<'a> {
     /// Files on the shelf (glyph, name, folder).
     pub shelf: &'a [ClipRow],
     pub text: Option<&'a TextView>,
+    pub control: Option<&'a ControlView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CtlIcon {
+    /// Wi-Fi signal bars (1..4) and whether the network is secured.
+    Wifi(u32, bool),
+    Headphones,
+    Input,
+    Phone,
+    Device,
+    Vpn,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CtlRow {
+    pub icon: CtlIcon,
+    pub title: String,
+    pub sub: String,
+    pub action: Option<String>,
+    pub active: bool,
+}
+
+/// The Control tab; part of the panel cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlView {
+    pub segment: usize,
+    pub rows: Vec<CtlRow>,
+    pub empty: String,
+    pub message: String,
+    pub busy: bool,
+    /// Row asking for a Wi-Fi password: (row, masked field, focused).
+    pub password: Option<(usize, TextField, bool)>,
+    /// Power button waiting for a second click.
+    pub confirm: Option<usize>,
 }
 
 /// The Text tab; part of the panel cache key.
@@ -248,6 +283,7 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    control: Option<ControlView>,
     text: Option<TextView>,
     shelf: Vec<ClipRow>,
     search: Option<SearchView>,
@@ -1393,6 +1429,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            control: if scene.tab == Tab::Control { scene.control.cloned() } else { None },
             text: if scene.tab == Tab::Text { scene.text.cloned() } else { None },
             shelf: if scene.tab == Tab::Shelf { scene.shelf.to_vec() } else { Vec::new() },
             search: if scene.tab == Tab::Search { scene.search.cloned() } else { None },
@@ -1445,6 +1482,11 @@ impl Renderer {
                     self.paint_text_page(scene, t);
                 }
             }
+            Tab::Control => {
+                if let Some(c) = scene.control {
+                    self.paint_control(scene, c);
+                }
+            }
             Tab::Notes => {
                 if let Some(n) = scene.notes {
                     self.paint_notes(scene, n);
@@ -1484,6 +1526,14 @@ impl Renderer {
                     self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy - 4.0 * k }, 1.0 * k);
                 }
                 Tab::Search => {}
+                Tab::Control => {
+                    // Two sliders.
+                    for (dy, knob) in [(-3.0, 2.5), (3.5, -2.5)] {
+                        let y = cy + dy * k;
+                        self.line(ink, cx - 6.0 * k, y, cx + 6.0 * k, y, 1.5 * k);
+                        self.fill_circle(ink, cx + knob * k, y, 2.2 * k);
+                    }
+                }
                 Tab::Text => {
                     self.line(ink, cx - 5.5 * k, cy - 5.5 * k, cx + 5.5 * k, cy - 5.5 * k, 1.8 * k);
                     self.line(ink, cx, cy - 5.5 * k, cx, cy + 6.0 * k, 1.8 * k);
@@ -1780,6 +1830,166 @@ impl Renderer {
                 let s: Vec<u16> = layout::TOOLS[i].encode_utf16().collect();
                 self.dc.DrawText(&s, &fonts.small_center, &label, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             }
+        }
+    }
+
+    fn paint_ctl_icon(&self, icon: CtlIcon, cx: f32, cy: f32, k: f32, th: &Theme) {
+        let ink = th.text;
+        match icon {
+            CtlIcon::Wifi(bars, secured) => {
+                for i in 0..4u32 {
+                    let h = (3.0 + i as f32 * 3.0) * k;
+                    let x = cx - 7.0 * k + i as f32 * 4.0 * k;
+                    let mut c = ink;
+                    if i >= bars {
+                        c[3] = 0.25;
+                    }
+                    self.fill_rect(c, D2D_RECT_F { left: x, top: cy + 6.0 * k - h, right: x + 2.6 * k, bottom: cy + 6.0 * k }, 0.6 * k);
+                }
+                if secured {
+                    let (lx, ly) = (cx + 8.0 * k, cy + 3.0 * k);
+                    self.fill_rect(th.subtext, D2D_RECT_F { left: lx - 2.5 * k, top: ly - 1.0 * k, right: lx + 2.5 * k, bottom: ly + 3.0 * k }, 0.6 * k);
+                    self.line(th.subtext, lx - 1.5 * k, ly - 1.0 * k, lx - 1.5 * k, ly - 3.0 * k, 1.0 * k);
+                    self.line(th.subtext, lx + 1.5 * k, ly - 1.0 * k, lx + 1.5 * k, ly - 3.0 * k, 1.0 * k);
+                    self.line(th.subtext, lx - 1.5 * k, ly - 3.0 * k, lx + 1.5 * k, ly - 3.0 * k, 1.0 * k);
+                }
+            }
+            CtlIcon::Headphones => {
+                unsafe {
+                    self.brush.SetColor(&color(ink, 1.0));
+                    let arc = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 6.0 * k, radiusY: 6.0 * k };
+                    self.dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - 8.0 * k, top: cy - 8.0 * k, right: cx + 8.0 * k, bottom: cy + 1.0 * k }, D2D1_ANTIALIAS_MODE_ALIASED);
+                    self.dc.DrawEllipse(&arc, &self.brush, 1.6 * k, None);
+                    self.dc.PopAxisAlignedClip();
+                }
+                for sx in [-1.0f32, 1.0] {
+                    self.fill_rect(ink, D2D_RECT_F { left: cx + sx * 6.0 * k - 1.8 * k, top: cy - 1.0 * k, right: cx + sx * 6.0 * k + 1.8 * k, bottom: cy + 5.5 * k }, 1.0 * k);
+                }
+            }
+            CtlIcon::Input => unsafe {
+                self.brush.SetColor(&color(ink, 1.0));
+                let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 4.5 * k, radiusY: 6.5 * k };
+                self.dc.DrawEllipse(&e, &self.brush, 1.5 * k, None);
+                self.line(ink, cx, cy - 6.0 * k, cx, cy - 2.0 * k, 1.3 * k);
+            },
+            CtlIcon::Phone => unsafe {
+                self.brush.SetColor(&color(ink, 1.0));
+                let rr = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: cx - 4.0 * k, top: cy - 7.0 * k, right: cx + 4.0 * k, bottom: cy + 7.0 * k }, radiusX: 1.8 * k, radiusY: 1.8 * k };
+                self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.4 * k, None);
+            },
+            CtlIcon::Device => self.fill_circle(ink, cx, cy, 3.0 * k),
+            CtlIcon::Vpn => {
+                self.fill_polygon(ink, &[(cx, cy - 7.0 * k), (cx + 6.0 * k, cy - 4.5 * k), (cx + 5.0 * k, cy + 2.5 * k), (cx, cy + 7.0 * k), (cx - 5.0 * k, cy + 2.5 * k), (cx - 6.0 * k, cy - 4.5 * k)]);
+            }
+        }
+    }
+
+    fn paint_control(&self, scene: &Scene, c: &ControlView) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let r = layout::control_regions(scene.panel_size.0);
+        let px = |rc: Rect| D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        let text = |s: &str, fmt: &IDWriteTextFormat, rc: Rect, col: Rgba| unsafe {
+            self.brush.SetColor(&color(col, 1.0));
+            let w: Vec<u16> = s.encode_utf16().collect();
+            self.dc.DrawText(&w, fmt, &px(rc), &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        };
+        for (i, (seg, label)) in r.segments.iter().zip(["Wi‑Fi", "Bluetooth", "VPN"]).enumerate() {
+            let on = i == c.segment;
+            let fill = if on { th.tile_hover } else if scene.hot == Some(Hit::CtlSegment(i)) { th.tile } else { [0.0; 4] };
+            self.fill_rect(fill, px(*seg), 14.0 * k);
+            text(label, &fonts.lyric, *seg, if on { th.text } else { th.subtext });
+        }
+        // Refresh: a circular arrow.
+        let rb = px(r.refresh);
+        if scene.hot == Some(Hit::CtlRefresh) {
+            self.fill_rect(th.tile, rb, 14.0 * k);
+        }
+        let (cx, cy) = ((rb.left + rb.right) / 2.0, (rb.top + rb.bottom) / 2.0);
+        unsafe {
+            self.brush.SetColor(&color(th.subtext, 1.0));
+            self.dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - 8.0 * k, top: cy - 8.0 * k, right: cx + 8.0 * k, bottom: cy + 8.0 * k }, D2D1_ANTIALIAS_MODE_ALIASED);
+            let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 5.5 * k, radiusY: 5.5 * k };
+            self.dc.DrawEllipse(&e, &self.brush, 1.5 * k, None);
+            self.dc.PopAxisAlignedClip();
+        }
+        self.fill_polygon(th.subtext, &[(cx + 5.5 * k, cy - 4.0 * k), (cx + 8.0 * k, cy + 0.5 * k), (cx + 3.0 * k, cy + 0.5 * k)]);
+        let sb = px(r.settings);
+        self.fill_rect(if scene.hot == Some(Hit::CtlSettings) { th.tile_hover } else { th.tile }, sb, 14.0 * k);
+        text("Параметры", &fonts.lyric, r.settings, th.subtext);
+
+        if c.rows.is_empty() {
+            text(&c.empty, &fonts.lyric, Rect { h: 30.0 * 3.0, ..r.rows[0] }, th.subtext);
+        }
+        for (i, (row, rc)) in c.rows.iter().zip(&r.rows).enumerate() {
+            let b = px(*rc);
+            self.fill_rect(if row.active { th.tile_hover } else { th.tile }, b, 10.0 * k);
+            self.paint_ctl_icon(row.icon, b.left + 18.0 * k, (b.top + b.bottom) / 2.0, k, th);
+            let title = Rect { x: rc.x + 36.0, w: rc.w * 0.45 - 40.0, ..*rc };
+            text(&row.title, &fonts.track_artist, title, th.text);
+            match &c.password {
+                Some((pr, field, focus)) if *pr == i => {
+                    let (f, go) = layout::password_parts(rc);
+                    self.paint_field(field, f, *focus, "Пароль", &fonts.track_artist, true, k, th);
+                    self.fill_rect(th.accent, px(go), 8.0 * k);
+                    text("Войти", &fonts.lyric, go, [1.0; 4]);
+                }
+                _ => {
+                    let sub = Rect { x: rc.x + rc.w * 0.45, w: rc.w * 0.55 - 112.0, ..*rc };
+                    text(&row.sub, &fonts.small, Rect { y: rc.y + 7.0, h: 14.0, ..sub }, th.subtext);
+                    if let Some(a) = &row.action {
+                        let ab = r.actions[i];
+                        let fill = if scene.hot == Some(Hit::CtlAction(i)) { th.accent } else { th.tile_hover };
+                        self.fill_rect(fill, px(ab), 8.0 * k);
+                        text(a, &fonts.lyric, ab, th.text);
+                    }
+                }
+            }
+        }
+        let mut msg = th.accent;
+        if c.busy {
+            msg = th.subtext;
+        }
+        text(&c.message, &fonts.small, r.message, msg);
+
+        for (i, (p, rc)) in crate::control::POWER.iter().zip(&r.power).enumerate() {
+            let b = px(*rc);
+            let asking = c.confirm == Some(i);
+            let fill = if asking { [0.86, 0.24, 0.24, 1.0] } else if scene.hot == Some(Hit::Power(i)) { th.tile_hover } else { th.tile };
+            self.fill_rect(fill, b, 12.0 * k);
+            let (cx, cy) = ((b.left + b.right) / 2.0, b.top + 22.0 * k);
+            let ink = if asking { [1.0; 4] } else { th.text };
+            match p {
+                crate::control::Power::Lock => {
+                    self.fill_rect(ink, D2D_RECT_F { left: cx - 5.0 * k, top: cy - 1.0 * k, right: cx + 5.0 * k, bottom: cy + 6.0 * k }, 1.0 * k);
+                    unsafe {
+                        self.brush.SetColor(&color(ink, 1.0));
+                        let rr = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: cx - 3.2 * k, top: cy - 7.0 * k, right: cx + 3.2 * k, bottom: cy + 1.0 * k }, radiusX: 3.0 * k, radiusY: 3.0 * k };
+                        self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.5 * k, None);
+                    }
+                }
+                crate::control::Power::Sleep => {
+                    self.fill_circle(ink, cx, cy, 6.0 * k);
+                    self.fill_circle(fill, cx + 3.0 * k, cy - 2.5 * k, 5.0 * k);
+                }
+                crate::control::Power::Restart => unsafe {
+                    self.brush.SetColor(&color(ink, 1.0));
+                    let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 6.0 * k, radiusY: 6.0 * k };
+                    self.dc.DrawEllipse(&e, &self.brush, 1.6 * k, None);
+                    self.fill_polygon(fill, &[(cx + 2.0 * k, cy - 8.0 * k), (cx + 8.0 * k, cy - 8.0 * k), (cx + 8.0 * k, cy - 1.0 * k)]);
+                    self.fill_polygon(ink, &[(cx + 3.0 * k, cy - 7.5 * k), (cx + 7.5 * k, cy - 5.0 * k), (cx + 3.0 * k, cy - 2.5 * k)]);
+                },
+                crate::control::Power::Shutdown => unsafe {
+                    self.brush.SetColor(&color(ink, 1.0));
+                    self.dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - 8.0 * k, top: cy - 3.0 * k, right: cx + 8.0 * k, bottom: cy + 8.0 * k }, D2D1_ANTIALIAS_MODE_ALIASED);
+                    let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 6.0 * k, radiusY: 6.0 * k };
+                    self.dc.DrawEllipse(&e, &self.brush, 1.6 * k, None);
+                    self.dc.PopAxisAlignedClip();
+                    self.line(ink, cx, cy - 7.5 * k, cx, cy - 0.5 * k, 1.6 * k);
+                },
+            }
+            let label = if asking { "Точно?" } else { p.label() };
+            text(label, &fonts.small_center, Rect { y: rc.y + 38.0, h: 16.0, ..*rc }, ink);
         }
     }
 

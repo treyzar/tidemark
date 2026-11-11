@@ -22,12 +22,14 @@ use crate::overlay::{self, WM_OVERLAY_DONE};
 use crate::recognize::{self, WM_OCR};
 use crate::shelf::{self, WM_SHELF_DRAG, WM_SHELF_DROP};
 use crate::translate::{self, WM_TRANSLATED};
+use crate::control::{self, WM_CONTROL};
 use crate::{capture, text_tools};
 use std::sync::{Arc, Mutex};
 use crate::{clipboard, dock};
 use crate::media::{self, Command, MediaState, WM_MEDIA};
 use crate::lyrics::{self, Lines, WM_LYRICS};
 use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, SearchRow, SearchView, Shape, TextView, TimerUi, Toast, WindowView};
+use crate::render::{ControlView, CtlIcon, CtlRow};
 use crate::stats::Stats;
 use crate::theme::Theme;
 use crate::tray::{self, TrayAction};
@@ -94,6 +96,8 @@ const ALARM_PULSES: u32 = 20;
 /// Saves the note shortly after typing stops.
 const TIMER_NOTE_SAVE: usize = 16;
 /// Home tiles start below the tab row.
+/// Clears a power button waiting for its second click.
+const TIMER_CONFIRM: usize = 17;
 const HOME_OFFSET: f32 = layout::TAB_BAR_H - layout::PAD;
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
 const MENU_REMOVE: usize = 1;
@@ -227,6 +231,14 @@ pub struct Island {
     /// The next clipboard change is ours and already announced: record it
     /// in the history without the generic "Скопировано" notice.
     quiet_next_clip: bool,
+    control: Option<control::Service>,
+    ctl: control::State,
+    ctl_segment: usize,
+    /// Wi-Fi network asking for a password, and the password typed so far.
+    ctl_pw_ssid: Option<String>,
+    ctl_pw: TextField,
+    power_confirm: Option<usize>,
+    ctl_view: Option<ControlView>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +257,7 @@ enum Focus {
     Remind,
     Search,
     Text,
+    Password,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,6 +398,13 @@ pub fn create(cfg: Config) -> Result<HWND> {
             translate_slot: Arc::new(Mutex::new(None)),
             translating: false,
             quiet_next_clip: false,
+            control: None,
+            ctl: control::State::default(),
+            ctl_segment: 0,
+            ctl_pw_ssid: None,
+            ctl_pw: TextField::new(false),
+            power_confirm: None,
+            ctl_view: None,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -883,6 +903,38 @@ impl Island {
                     .position(|r| Rect { w, ..*r }.contains(dx, dy))
                     .map(Hit::ShelfRow);
             }
+            Tab::Control => {
+                let r = layout::control_regions(self.cfg.expanded_width);
+                if let Some(i) = r.segments.iter().position(|s| s.contains(dx, dy)) {
+                    return Some(Hit::CtlSegment(i));
+                }
+                if r.refresh.contains(dx, dy) {
+                    return Some(Hit::CtlRefresh);
+                }
+                if r.settings.contains(dx, dy) {
+                    return Some(Hit::CtlSettings);
+                }
+                if let Some(i) = r.power.iter().position(|p| p.contains(dx, dy)) {
+                    return Some(Hit::Power(i));
+                }
+                let view = self.ctl_view.as_ref()?;
+                if let Some((row, _, _)) = &view.password {
+                    let (field, go) = layout::password_parts(&r.rows[*row]);
+                    if field.contains(dx, dy) {
+                        return Some(Hit::PasswordField);
+                    }
+                    if go.contains(dx, dy) {
+                        return Some(Hit::PasswordGo);
+                    }
+                }
+                return r
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .take(view.rows.len())
+                    .find(|(i, a)| a.contains(dx, dy) && view.rows[*i].action.is_some() && view.password.as_ref().is_none_or(|p| p.0 != *i))
+                    .map(|(i, _)| Hit::CtlAction(i));
+            }
             Tab::Text => {
                 let r = layout::text_regions(self.cfg.expanded_width);
                 if r.copy.contains(dx, dy) {
@@ -980,6 +1032,24 @@ impl Island {
             Some(Hit::SearchField) => self.set_focus(Focus::Search),
             Some(Hit::SearchRow(i)) => self.open_hit(i, false),
             Some(Hit::Tool(i)) => self.run_tool(i),
+            Some(Hit::CtlSegment(i)) => {
+                self.ctl_segment = i;
+                self.ctl_pw_ssid = None;
+                self.refresh_control_view();
+            }
+            Some(Hit::CtlRefresh) => {
+                if let Some(c) = &self.control {
+                    c.send(control::Command::Refresh);
+                }
+            }
+            Some(Hit::CtlSettings) => {
+                let page = ["ms-settings:network-wifi", "ms-settings:bluetooth", "ms-settings:network-vpn"][self.ctl_segment.min(2)];
+                control::open_settings(page);
+            }
+            Some(Hit::CtlAction(i)) => self.control_action(i),
+            Some(Hit::PasswordField) => self.set_focus(Focus::Password),
+            Some(Hit::PasswordGo) => self.submit_password(),
+            Some(Hit::Power(i)) => self.power_click(i),
             Some(Hit::TextField) => self.set_focus(Focus::Text),
             Some(Hit::TextOp(i)) => self.text_op(i),
             Some(Hit::TextTranslate) => self.translate_text(),
@@ -1090,6 +1160,16 @@ impl Island {
         if tab == Tab::Clipboard {
             self.refresh_clip_rows();
         }
+        if tab == Tab::Control {
+            // Started on first use; refreshed (and Wi-Fi rescanned) on each visit.
+            if self.control.is_none() {
+                self.control = control::Service::start(self.hwnd);
+            }
+            if let Some(c) = &self.control {
+                c.send(control::Command::Refresh);
+            }
+            self.refresh_control_view();
+        }
     }
 
     fn set_focus(&mut self, focus: Focus) {
@@ -1129,11 +1209,16 @@ impl Island {
             Focus::Remind => Some(&mut self.remind),
             Focus::Search => Some(&mut self.search),
             Focus::Text => Some(&mut self.text),
+            Focus::Password => Some(&mut self.ctl_pw),
             Focus::None => None,
         }
     }
 
     fn after_edit(&mut self) {
+        if self.focus == Focus::Password {
+            self.refresh_control_view();
+            return;
+        }
         if self.focus == Focus::Text {
             self.text_status.clear();
             self.refresh_text_view();
@@ -1212,12 +1297,23 @@ impl Island {
                 _ => {}
             }
         }
+        if self.focus == Focus::Password && VIRTUAL_KEY(vk) == VK_ESCAPE {
+            self.ctl_pw_ssid = None;
+            self.ctl_pw.clear();
+            self.set_focus(Focus::None);
+            self.refresh_control_view();
+            return true;
+        }
         match VIRTUAL_KEY(vk) {
             VK_ESCAPE => {
                 self.set_focus(Focus::None);
                 unsafe {
                     SetTimer(Some(hwnd), TIMER_COLLAPSE, COLLAPSE_DELAY_MS, None);
                 }
+                return true;
+            }
+            VK_RETURN if !multiline && self.focus == Focus::Password => {
+                self.submit_password();
                 return true;
             }
             VK_RETURN if !multiline => {
@@ -1626,6 +1722,156 @@ impl Island {
         };
         if Some(&view) != self.text_view.as_ref() {
             self.text_view = Some(view);
+            self.dirty = true;
+        }
+    }
+
+    fn control_arrived(&mut self) {
+        if let Some(c) = &self.control {
+            self.ctl = c.get();
+        }
+        self.refresh_control_view();
+    }
+
+    fn control_action(&mut self, row: usize) {
+        let Some(c) = &self.control else { return };
+        match self.ctl_segment {
+            0 => {
+                let Some(n) = self.ctl.networks.get(row).cloned() else { return };
+                if n.connected {
+                    c.send(control::Command::WifiDisconnect);
+                } else if n.auth == control::Auth::Other {
+                    control::open_settings("ms-settings:network-wifi");
+                } else if n.saved || !n.secured {
+                    c.send(control::Command::WifiConnect { ssid: n.ssid, password: None });
+                } else {
+                    // Ask for the password right in the row.
+                    self.ctl_pw_ssid = Some(n.ssid);
+                    self.ctl_pw.clear();
+                    self.set_focus(Focus::Password);
+                }
+            }
+            1 => {
+                if let Some(d) = self.ctl.devices.get(row) {
+                    c.send(control::Command::Bluetooth { address: d.address, connect: !d.connected });
+                }
+            }
+            _ => {
+                if let Some(v) = self.ctl.vpns.get(row) {
+                    c.send(if v.connected { control::Command::VpnDisconnect(v.name.clone()) } else { control::Command::VpnConnect(v.name.clone()) });
+                }
+            }
+        }
+        self.refresh_control_view();
+    }
+
+    fn submit_password(&mut self) {
+        let (Some(ssid), Some(c)) = (self.ctl_pw_ssid.take(), &self.control) else { return };
+        let password = std::mem::take(&mut self.ctl_pw.text);
+        self.ctl_pw.clear();
+        c.send(control::Command::WifiConnect { ssid, password: Some(password) });
+        self.set_focus(Focus::None);
+        self.refresh_control_view();
+    }
+
+    /// Lock acts at once; sleep, restart and shutdown need a second click
+    /// within 3 seconds.
+    fn power_click(&mut self, i: usize) {
+        let action = control::POWER[i];
+        if action.needs_confirm() && self.power_confirm != Some(i) {
+            self.power_confirm = Some(i);
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_CONFIRM, 3000, None);
+            }
+            self.refresh_control_view();
+            return;
+        }
+        self.power_confirm = None;
+        self.refresh_control_view();
+        self.set_hover(false);
+        control::power(action);
+    }
+
+    fn refresh_control_view(&mut self) {
+        let ctl = &self.ctl;
+        let (rows, empty): (Vec<CtlRow>, String) = match self.ctl_segment {
+            0 => (
+                ctl.networks
+                    .iter()
+                    .take(layout::CTL_ROWS)
+                    .map(|n| CtlRow {
+                        icon: CtlIcon::Wifi(control::bars(n.signal), n.secured),
+                        title: n.ssid.clone(),
+                        sub: if n.connected {
+                            "Подключено".into()
+                        } else if n.saved {
+                            "Сохранена".into()
+                        } else if n.secured {
+                            "Защищена".into()
+                        } else {
+                            "Открытая".into()
+                        },
+                        action: Some(if n.connected {
+                            "Отключить".into()
+                        } else if n.auth == control::Auth::Other {
+                            "Параметры".into()
+                        } else {
+                            "Подключить".into()
+                        }),
+                        active: n.connected,
+                    })
+                    .collect(),
+                if ctl.wifi_present { "Ищу сети…".into() } else { "Нет адаптера Wi‑Fi".into() },
+            ),
+            1 => (
+                ctl.devices
+                    .iter()
+                    .take(layout::CTL_ROWS)
+                    .map(|d| {
+                        let (icon, kind) = match d.kind {
+                            control::DeviceKind::Audio => (CtlIcon::Headphones, "Аудио"),
+                            control::DeviceKind::Input => (CtlIcon::Input, "Ввод"),
+                            control::DeviceKind::Phone => (CtlIcon::Phone, "Телефон"),
+                            control::DeviceKind::Other => (CtlIcon::Device, "Устройство"),
+                        };
+                        CtlRow {
+                            icon,
+                            title: d.name.clone(),
+                            sub: format!("{kind} · {}", if d.connected { "подключено" } else { "не подключено" }),
+                            action: (d.kind == control::DeviceKind::Audio).then(|| if d.connected { "Отключить".into() } else { "Подключить".into() }),
+                            active: d.connected,
+                        }
+                    })
+                    .collect(),
+                "Нет сопряжённых устройств — добавьте их в «Параметрах»".into(),
+            ),
+            _ => (
+                ctl.vpns
+                    .iter()
+                    .take(layout::CTL_ROWS)
+                    .map(|v| CtlRow {
+                        icon: CtlIcon::Vpn,
+                        title: v.name.clone(),
+                        sub: if v.connected { "Подключён".into() } else { "Отключён".into() },
+                        action: Some(if v.connected { "Отключить".into() } else { "Подключить".into() }),
+                        active: v.connected,
+                    })
+                    .collect(),
+                "Нет VPN-подключений Windows — их добавляют в «Параметрах»".into(),
+            ),
+        };
+        let password = match (&self.ctl_pw_ssid, self.ctl_segment) {
+            (Some(ssid), 0) => ctl.networks.iter().take(layout::CTL_ROWS).position(|n| &n.ssid == ssid).map(|row| {
+                // Shown as dots.
+                let mut masked = self.ctl_pw.clone();
+                masked.text = "•".repeat(self.ctl_pw.len());
+                (row, masked, self.focus == Focus::Password)
+            }),
+            _ => None,
+        };
+        let view = ControlView { segment: self.ctl_segment, rows, empty, message: ctl.message.clone(), busy: ctl.busy, password, confirm: self.power_confirm };
+        if Some(&view) != self.ctl_view.as_ref() {
+            self.ctl_view = Some(view);
             self.dirty = true;
         }
     }
@@ -2279,6 +2525,7 @@ impl Island {
             search: self.search_view.as_ref(),
             shelf: &self.shelf_rows,
             text: self.text_view.as_ref(),
+            control: self.ctl_view.as_ref(),
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -2350,7 +2597,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let _ = ScreenToClient(hwnd, &mut pt);
-            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField | Hit::SearchField | Hit::TextField)));
+            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField | Hit::SearchField | Hit::TextField | Hit::PasswordField)));
             return LRESULT(if field == Some(true) { MA_ACTIVATE } else { MA_NOACTIVATE } as isize);
         }
         WM_ACTIVATE => {
@@ -2681,6 +2928,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_LAUNCHER => {
             with_island(|i| if i.tab == Tab::Search { i.close_search() } else { i.open_search() });
+            return LRESULT(0);
+        }
+        WM_CONTROL => {
+            with_island(|i| i.control_arrived());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_CONFIRM => {
+            let _ = KillTimer(Some(hwnd), TIMER_CONFIRM);
+            with_island(|i| {
+                i.power_confirm = None;
+                i.refresh_control_view();
+            });
             return LRESULT(0);
         }
         WM_OVERLAY_DONE => {

@@ -9,6 +9,7 @@ mod capture;
 mod clip_history;
 mod clipboard;
 mod config;
+mod control;
 mod dock;
 mod fullscreen;
 mod http;
