@@ -13,6 +13,7 @@ use crate::beat::{self, WM_BEAT};
 use crate::config::Config;
 use crate::clip_history::{self, Entry, History};
 use crate::layout::{self, Hit, Placed, Rect, Tab, TileKind};
+use crate::launcher::{self, WM_INDEX};
 use crate::notes::{self, Reminder};
 use crate::textinput::TextField;
 use crate::timer::{self, Timer};
@@ -20,7 +21,7 @@ use crate::fullscreen::{self, ABN_FULLSCREENAPP, WM_APPBAR, WM_FOREGROUND};
 use crate::{clipboard, dock};
 use crate::media::{self, Command, MediaState, WM_MEDIA};
 use crate::lyrics::{self, Lines, WM_LYRICS};
-use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, Shape, TimerUi, Toast, WindowView};
+use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, SearchRow, SearchView, Shape, TimerUi, Toast, WindowView};
 use crate::stats::Stats;
 use crate::theme::Theme;
 use crate::tray::{self, TrayAction};
@@ -110,6 +111,7 @@ const HANDLE_H: f32 = 6.0;
 /// Volume changes are sent at most this often while dragging.
 const VOLUME_THROTTLE: Duration = Duration::from_millis(40);
 const HOTKEY_THEME: i32 = 1;
+const HOTKEY_LAUNCHER: i32 = 2;
 
 pub struct Island {
     hwnd: HWND,
@@ -194,6 +196,22 @@ pub struct Island {
     alarm_pulses: u32,
     /// High surrogate of a character arriving in two WM_CHARs.
     pending_surrogate: Option<u16>,
+    index: launcher::Index,
+    search: TextField,
+    search_hits: Vec<SearchHit>,
+    search_sel: usize,
+    search_view: Option<SearchView>,
+    /// Tab to go back to when the search closes.
+    tab_before_search: Tab,
+}
+
+#[derive(Debug, Clone)]
+enum SearchHit {
+    Item(launcher::Item),
+    /// Calculator result, ready to copy.
+    Calc(String),
+    /// Search the web for the query.
+    Web(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +219,7 @@ enum Focus {
     None,
     Note,
     Remind,
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +342,12 @@ pub fn create(cfg: Config) -> Result<HWND> {
             alarm: None,
             alarm_pulses: 0,
             pending_surrogate: None,
+            index: launcher::Index::new(),
+            search: TextField::new(false),
+            search_hits: Vec::new(),
+            search_sel: 0,
+            search_view: None,
+            tab_before_search: Tab::Home,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -363,6 +388,9 @@ pub fn create(cfg: Config) -> Result<HWND> {
         TASKBAR_CREATED.with(|c| c.set(RegisterWindowMessageW(w!("TaskbarCreated"))));
         tray::add(hwnd);
         let _ = RegisterHotKey(Some(hwnd), HOTKEY_THEME, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T' as u32);
+        if with_island(|i| i.cfg.launcher) == Some(true) {
+            let _ = RegisterHotKey(Some(hwnd), HOTKEY_LAUNCHER, MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32);
+        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         Ok(hwnd)
     }
@@ -787,11 +815,19 @@ impl Island {
         let shape = self.shape();
         let (ox, oy) = self.panel_origin(&shape);
         let (dx, dy) = ((x as f32 - ox) / self.scale, (y as f32 - oy) / self.scale);
+        if self.tab == Tab::Search {
+            let w = self.cfg.expanded_width;
+            if layout::search_field(w).contains(dx, dy) {
+                return Some(Hit::SearchField);
+            }
+            let n = self.search_view.as_ref().map_or(0, |v| v.rows.len());
+            return layout::search_rows(w).iter().take(n).position(|r| r.contains(dx, dy)).map(Hit::SearchRow);
+        }
         if dy < layout::TAB_BAR_H {
             return layout::tab_buttons(self.tab).into_iter().find(|(_, r)| r.contains(dx, dy)).map(|(t, _)| Hit::Tab(t));
         }
         match self.tab {
-            Tab::Home => {}
+            Tab::Home | Tab::Search => {}
             Tab::Clipboard => {
                 let w = self.cfg.expanded_width - 2.0 * layout::PAD;
                 return layout::clip_page_rows()
@@ -880,6 +916,8 @@ impl Island {
             Some(Hit::Clip(i)) => self.recopy(i),
             Some(Hit::Tab(t)) => self.switch_tab(t),
             Some(Hit::NoteField) => self.set_focus(Focus::Note),
+            Some(Hit::SearchField) => self.set_focus(Focus::Search),
+            Some(Hit::SearchRow(i)) => self.open_hit(i, false),
             Some(Hit::RemindField) => self.set_focus(Focus::Remind),
             Some(Hit::TimerPreset(i)) => {
                 self.timer.start(Duration::from_secs(layout::TIMER_PRESETS[i]), Instant::now());
@@ -951,6 +989,7 @@ impl Island {
     fn tab_height(&self, tab: Tab) -> f32 {
         match tab {
             Tab::Home => self.home_height,
+            Tab::Search => layout::SEARCH_H,
             _ => layout::TAB_BAR_H + layout::PAGE_H,
         }
     }
@@ -996,11 +1035,16 @@ impl Island {
         match self.focus {
             Focus::Note => Some(&mut self.note),
             Focus::Remind => Some(&mut self.remind),
+            Focus::Search => Some(&mut self.search),
             Focus::None => None,
         }
     }
 
     fn after_edit(&mut self) {
+        if self.focus == Focus::Search {
+            self.run_search();
+            return;
+        }
         if self.focus == Focus::Note {
             unsafe {
                 SetTimer(Some(self.hwnd), TIMER_NOTE_SAVE, 800, None);
@@ -1046,6 +1090,30 @@ impl Island {
         let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
         let hwnd = self.hwnd;
         let multiline = self.focus == Focus::Note;
+        if self.focus == Focus::Search {
+            let n = self.search_hits.len();
+            match VIRTUAL_KEY(vk) {
+                VK_ESCAPE => {
+                    self.close_search();
+                    return true;
+                }
+                VK_RETURN => {
+                    self.open_hit(self.search_sel, ctrl);
+                    return true;
+                }
+                VK_DOWN if n > 0 => {
+                    self.search_sel = (self.search_sel + 1) % n;
+                    self.refresh_search_view();
+                    return true;
+                }
+                VK_UP if n > 0 => {
+                    self.search_sel = (self.search_sel + n - 1) % n;
+                    self.refresh_search_view();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match VIRTUAL_KEY(vk) {
             VK_ESCAPE => {
                 self.set_focus(Focus::None);
@@ -1089,6 +1157,137 @@ impl Island {
         }
         self.after_edit();
         true
+    }
+
+    /// Alt+Space: the island opens straight into the search.
+    fn open_search(&mut self) {
+        if self.tab != Tab::Search {
+            self.tab_before_search = self.tab;
+        }
+        self.index.refresh(self.hwnd);
+        if self.fullscreen {
+            self.slide_in();
+        }
+        self.search.clear();
+        self.search_hits.clear();
+        self.search_sel = 0;
+        self.tab = Tab::Search;
+        self.panel_height = self.tab_height(Tab::Search);
+        if self.hovered {
+            self.height.target = self.panel_height;
+            self.last_frame = None;
+        } else {
+            self.set_hover(true);
+        }
+        self.hot = None;
+        self.set_focus(Focus::Search);
+        self.refresh_search_view();
+    }
+
+    fn close_search(&mut self) {
+        if self.tab != Tab::Search {
+            return;
+        }
+        self.tab = self.tab_before_search;
+        self.panel_height = self.tab_height(self.tab);
+        self.set_focus(Focus::None);
+        self.set_hover(false);
+        self.dirty = true;
+    }
+
+    fn run_search(&mut self) {
+        let q = self.search.text.trim().to_string();
+        let mut hits = Vec::new();
+        if let Some(v) = launcher::calc(&q) {
+            hits.push(SearchHit::Calc(launcher::format_number(v)));
+        }
+        if !q.is_empty() {
+            let items = self.index.snapshot();
+            let room = layout::SEARCH_ROWS - hits.len() - 1;
+            hits.extend(launcher::search(&items, &q, room).into_iter().map(|i| SearchHit::Item(items[i].clone())));
+            hits.push(SearchHit::Web(q));
+        }
+        self.search_hits = hits;
+        self.search_sel = 0;
+        self.refresh_search_view();
+    }
+
+    fn refresh_search_view(&mut self) {
+        let hits = self.search_hits.clone();
+        let rows: Vec<SearchRow> = hits
+            .iter()
+            .map(|h| match h {
+                SearchHit::Calc(v) => SearchRow { badge: Badge::Text("=".into()), title: format!("= {v}"), subtitle: "Enter — скопировать".into() },
+                SearchHit::Web(q) => SearchRow { badge: Badge::Glyph(clip_history::Glyph::Link), title: format!("Искать «{q}» в интернете"), subtitle: "Браузер".into() },
+                SearchHit::Item(it) => {
+                    let badge = match it.kind {
+                        launcher::Kind::App => self.app_icon(&it.path).map_or(Badge::Glyph(clip_history::Glyph::Files), Badge::App),
+                        launcher::Kind::Folder => Badge::Glyph(clip_history::Glyph::Files),
+                        _ => {
+                            let lower = it.name.to_lowercase();
+                            let image = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"].iter().any(|e| lower.ends_with(e));
+                            Badge::Glyph(if image { clip_history::Glyph::Image } else { clip_history::Glyph::Text })
+                        }
+                    };
+                    let subtitle = match it.kind {
+                        launcher::Kind::App => "Приложение".to_string(),
+                        launcher::Kind::Recent => "Недавнее".to_string(),
+                        launcher::Kind::Folder => "Папка".to_string(),
+                        launcher::Kind::File => std::path::Path::new(&it.path)
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    };
+                    SearchRow { badge, title: it.name.clone(), subtitle }
+                }
+            })
+            .collect();
+        let indexed = !self.index.snapshot().is_empty();
+        let hint = if self.search.is_empty() {
+            "Приложения, файлы с рабочего стола, «Документов» и «Загрузок», калькулятор".to_string()
+        } else if !indexed {
+            "Индексирую файлы…".to_string()
+        } else {
+            "Ничего не нашлось".to_string()
+        };
+        let view = SearchView { field: self.search.clone(), rows, selected: self.search_sel.min(hits.len().saturating_sub(1)), hint };
+        if Some(&view) != self.search_view.as_ref() {
+            self.search_view = Some(view);
+            self.dirty = true;
+        }
+    }
+
+    /// Opens result `i`; with Ctrl, shows a file in its folder instead.
+    fn open_hit(&mut self, i: usize, ctrl: bool) {
+        let Some(hit) = self.search_hits.get(i).cloned() else { return };
+        match hit {
+            SearchHit::Item(it) => {
+                if ctrl && matches!(it.kind, launcher::Kind::File | launcher::Kind::Folder) {
+                    unsafe {
+                        let _ = AllowSetForegroundWindow(ASFW_ANY);
+                        windows::Win32::UI::Shell::ShellExecuteW(
+                            None,
+                            w!("open"),
+                            w!("explorer.exe"),
+                            &windows::core::HSTRING::from(format!("/select,\"{}\"", it.path)),
+                            None,
+                            SW_SHOWNORMAL,
+                        );
+                    }
+                } else {
+                    dock::launch(&it.path);
+                }
+            }
+            SearchHit::Calc(v) => {
+                clipboard::write(self.hwnd, &Entry::Text { text: v });
+            }
+            SearchHit::Web(q) => {
+                let url = self.cfg.search_url.replace("{q}", &crate::http::encode(&q));
+                dock::launch(&url);
+            }
+        }
+        self.close_search();
     }
 
     fn since_midnight() -> u64 {
@@ -1722,6 +1921,7 @@ impl Island {
             tab: self.tab,
             notes: self.notes_view.as_ref(),
             clip_page: &self.clip_page,
+            search: self.search_view.as_ref(),
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -1793,7 +1993,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let _ = ScreenToClient(hwnd, &mut pt);
-            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField)));
+            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField | Hit::SearchField)));
             return LRESULT(if field == Some(true) { MA_ACTIVATE } else { MA_NOACTIVATE } as isize);
         }
         WM_ACTIVATE => {
@@ -1803,7 +2003,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = GetCursorPos(&mut pt);
                 let _ = ScreenToClient(hwnd, &mut pt);
                 let outside = with_island(|i| {
-                    i.set_focus(Focus::None);
+                    if i.tab == Tab::Search {
+                        i.close_search();
+                    } else {
+                        i.set_focus(Focus::None);
+                    }
                     !i.inside(pt.x, pt.y)
                 });
                 if outside == Some(true) {
@@ -2100,6 +2304,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| i.weather_arrived());
             return LRESULT(0);
         }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_LAUNCHER => {
+            with_island(|i| if i.tab == Tab::Search { i.close_search() } else { i.open_search() });
+            return LRESULT(0);
+        }
+        WM_INDEX => {
+            with_island(|i| {
+                if i.tab == Tab::Search {
+                    i.run_search();
+                }
+            });
+            return LRESULT(0);
+        }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_THEME => {
             with_island(|i| i.toggle_theme());
             return LRESULT(0);
@@ -2143,6 +2359,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             with_island(|i| i.fs_watcher = None);
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY_THEME);
+            let _ = UnregisterHotKey(Some(hwnd), HOTKEY_LAUNCHER);
             tray::remove(hwnd);
             PostQuitMessage(0);
             return LRESULT(0);

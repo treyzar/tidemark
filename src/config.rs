@@ -54,6 +54,10 @@ pub struct Config {
     pub osd: bool,
     /// Dots and a notice while an app uses the camera or microphone.
     pub privacy_indicator: bool,
+    /// Alt+Space opens the island's search (apps, files, calculator).
+    pub launcher: bool,
+    /// Web search for the last search row; {q} is the query.
+    pub search_url: String,
     /// Programs and shortcuts in the Home dock (%VARS% allowed). Absent on
     /// first run, when a few Windows apps are filled in.
     pub dock_apps: Option<Vec<String>>,
@@ -88,6 +92,8 @@ impl Default for Config {
             show_active_app: true,
             osd: true,
             privacy_indicator: true,
+            launcher: true,
+            search_url: "https://yandex.ru/search/?text={q}".into(),
             dock_apps: None,
             gpu: false,
         }

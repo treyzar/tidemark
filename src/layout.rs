@@ -197,6 +197,9 @@ pub enum Hit {
     TimerReset,
     /// Remove reminder row `n`.
     RemindRemove(usize),
+    SearchField,
+    /// Search result `n`.
+    SearchRow(usize),
 }
 
 /// Views of the open island, shown as a row of tabs on top.
@@ -205,6 +208,8 @@ pub enum Tab {
     Home,
     Clipboard,
     Notes,
+    /// Alt+Space search; not in the tab row.
+    Search,
 }
 
 pub const TABS: [Tab; 3] = [Tab::Home, Tab::Clipboard, Tab::Notes];
@@ -215,6 +220,7 @@ impl Tab {
             Tab::Home => "Главная",
             Tab::Clipboard => "Буфер",
             Tab::Notes => "Заметки",
+            Tab::Search => "Поиск",
         }
     }
 }
@@ -287,6 +293,17 @@ pub fn notes_regions(width: f32) -> NotesRegions {
         rows,
         removes,
     }
+}
+
+pub const SEARCH_ROWS: usize = 6;
+pub const SEARCH_H: f32 = 64.0 + SEARCH_ROWS as f32 * 38.0 + 8.0;
+
+pub fn search_field(width: f32) -> Rect {
+    Rect { x: PAD, y: 12.0, w: width - 2.0 * PAD, h: 40.0 }
+}
+
+pub fn search_rows(width: f32) -> Vec<Rect> {
+    (0..SEARCH_ROWS).map(|i| Rect { x: PAD, y: 62.0 + i as f32 * 38.0, w: width - 2.0 * PAD, h: 36.0 }).collect()
 }
 
 /// Rows of the Clipboard tab.

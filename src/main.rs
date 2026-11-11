@@ -12,6 +12,7 @@ mod dock;
 mod fullscreen;
 mod http;
 mod island;
+mod launcher;
 mod layout;
 mod lyrics;
 mod legacy_players;

@@ -80,6 +80,24 @@ pub struct Scene<'a> {
     pub notes: Option<&'a NotesView>,
     /// Rows of the Clipboard tab.
     pub clip_page: &'a [ClipRow],
+    pub search: Option<&'a SearchView>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchRow {
+    pub badge: Badge,
+    pub title: String,
+    pub subtitle: String,
+}
+
+/// The Alt+Space search; part of the panel cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchView {
+    pub field: TextField,
+    pub rows: Vec<SearchRow>,
+    pub selected: usize,
+    /// Shown when there are no rows.
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -215,6 +233,7 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    search: Option<SearchView>,
     tab: Tab,
     notes: Option<NotesView>,
     clip_page: Vec<ClipRow>,
@@ -1348,6 +1367,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            search: if scene.tab == Tab::Search { scene.search.cloned() } else { None },
             tab: scene.tab,
             notes: if scene.tab == Tab::Notes { scene.notes.cloned() } else { None },
             clip_page: if scene.tab == Tab::Clipboard { scene.clip_page.to_vec() } else { Vec::new() },
@@ -1380,8 +1400,15 @@ impl Renderer {
 
     /// Paints the Home view with its top-left at (0, 0), fully opaque.
     fn paint_home(&self, scene: &Scene) {
+        if scene.tab == Tab::Search {
+            if let Some(v) = scene.search {
+                self.paint_search(scene, v);
+            }
+            return;
+        }
         self.paint_tabs(scene);
         match scene.tab {
+            Tab::Search => {}
             Tab::Home => self.paint_tiles(scene),
             Tab::Clipboard => self.paint_clip_page(scene),
             Tab::Notes => {
@@ -1422,6 +1449,7 @@ impl Renderer {
                     }
                     self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy - 4.0 * k }, 1.0 * k);
                 }
+                Tab::Search => {}
                 Tab::Notes => {
                     for (i, w) in [9.0, 9.0, 6.0].iter().enumerate() {
                         let y = cy - 4.0 * k + i as f32 * 4.0 * k;
@@ -1573,6 +1601,66 @@ impl Renderer {
             let (cx, cy) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
             self.line(th.subtext, cx - 3.5 * k, cy - 3.5 * k, cx + 3.5 * k, cy + 3.5 * k, 1.3 * k);
             self.line(th.subtext, cx + 3.5 * k, cy - 3.5 * k, cx - 3.5 * k, cy + 3.5 * k, 1.3 * k);
+        }
+    }
+
+    fn paint_search(&self, scene: &Scene, v: &SearchView) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let w = scene.panel_size.0;
+        let px = |rc: Rect| D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        let field = layout::search_field(w);
+        // Magnifier, then the text.
+        let f = px(field);
+        self.fill_rect(th.tile_hover, f, 12.0 * k);
+        let (gx, gy) = (f.left + 18.0 * k, (f.top + f.bottom) / 2.0);
+        unsafe {
+            self.brush.SetColor(&color(th.subtext, 1.0));
+            let e = D2D1_ELLIPSE { point: pt(gx - 1.5 * k, gy - 1.5 * k), radiusX: 5.5 * k, radiusY: 5.5 * k };
+            self.dc.DrawEllipse(&e, &self.brush, 1.6 * k, None);
+        }
+        self.line(th.subtext, gx + 2.5 * k, gy + 2.5 * k, gx + 6.5 * k, gy + 6.5 * k, 1.8 * k);
+        let text_rc = Rect { x: field.x + 34.0, y: field.y + 10.0, w: field.w - 120.0, h: 22.0 };
+        self.paint_field(&v.field, text_rc, true, "Приложения, файлы, 2+2…", &fonts.track_title, false, k, th);
+        unsafe {
+            self.brush.SetColor(&color(th.subtext, 1.0));
+            let hint = D2D_RECT_F { left: f.right - 90.0 * k, top: f.top, right: f.right - 12.0 * k, bottom: f.bottom };
+            let s: Vec<u16> = "Alt+Space".encode_utf16().collect();
+            let r = D2D_RECT_F { top: (f.top + f.bottom) / 2.0 - 7.0 * k, bottom: (f.top + f.bottom) / 2.0 + 7.0 * k, ..hint };
+            self.dc.DrawText(&s, &fonts.small_right, &r, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        }
+        let rows = layout::search_rows(w);
+        if v.rows.is_empty() {
+            unsafe {
+                self.brush.SetColor(&color(th.subtext, 1.0));
+                let s: Vec<u16> = v.hint.encode_utf16().collect();
+                let r = px(Rect { x: rows[0].x, y: rows[0].y, w: rows[0].w, h: 36.0 * 2.0 });
+                self.dc.DrawText(&s, &fonts.lyric, &r, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            return;
+        }
+        for (i, (row, rc)) in v.rows.iter().zip(rows).enumerate() {
+            let r = px(rc);
+            if i == v.selected {
+                self.fill_rect(th.tile_hover, r, 10.0 * k);
+            } else if scene.hot == Some(Hit::SearchRow(i)) {
+                self.fill_rect(th.tile, r, 10.0 * k);
+            }
+            let side = 28.0 * k;
+            let cy = (r.top + r.bottom) / 2.0;
+            let badge = D2D_RECT_F { left: r.left + 6.0 * k, top: cy - side / 2.0, right: r.left + 6.0 * k + side, bottom: cy + side / 2.0 };
+            self.paint_badge(&row.badge, badge, k, th);
+            unsafe {
+                let sub_w = 220.0 * k;
+                let title = D2D_RECT_F { left: badge.right + 10.0 * k, top: r.top, right: r.right - sub_w - 8.0 * k, bottom: r.bottom };
+                self.brush.SetColor(&color(th.text, 1.0));
+                let t: Vec<u16> = row.title.encode_utf16().collect();
+                self.dc.DrawText(&t, &fonts.track_title, &title, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let sub = D2D_RECT_F { left: r.right - sub_w, top: cy - 7.0 * k, right: r.right - 10.0 * k, bottom: cy + 7.0 * k };
+                self.brush.SetColor(&color(th.subtext, 1.0));
+                let s: Vec<u16> = row.subtitle.encode_utf16().collect();
+                self.dc.DrawText(&s, &fonts.small_right, &sub, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
         }
     }
 
