@@ -1757,6 +1757,18 @@ impl Island {
                 }
             }
             _ => {
+                // Rows: [Throne], system proxy, then Windows VPNs.
+                let throne_row = self.ctl.throne.installed as usize;
+                if throne_row == 1 && row == 0 {
+                    c.send(control::Command::ThroneOpen);
+                    return;
+                }
+                if row == throne_row {
+                    c.send(control::Command::Proxy(!self.ctl.throne.proxy_on));
+                    self.refresh_control_view();
+                    return;
+                }
+                let row = row - throne_row - 1;
                 if let Some(v) = self.ctl.vpns.get(row) {
                     c.send(if v.connected { control::Command::VpnDisconnect(v.name.clone()) } else { control::Command::VpnConnect(v.name.clone()) });
                 }
@@ -1846,17 +1858,39 @@ impl Island {
                 "Нет сопряжённых устройств — добавьте их в «Параметрах»".into(),
             ),
             _ => (
-                ctl.vpns
+                {
+                    let t = &ctl.throne;
+                    let mut rows = Vec::new();
+                    if t.installed {
+                        rows.push(CtlRow {
+                            icon: CtlIcon::Vpn,
+                            title: "Throne".into(),
+                            sub: crate::throne::summary(t),
+                            action: Some(if t.running { "Открыть".into() } else { "Запустить".into() }),
+                            active: t.running && (t.tun_up || t.proxy_on),
+                        });
+                    }
+                    rows.push(CtlRow {
+                        icon: CtlIcon::Device,
+                        title: "Системный прокси".into(),
+                        sub: if t.proxy_on { format!("Включён · {}", t.proxy_server) } else { "Выключен".into() },
+                        action: Some(if t.proxy_on { "Выключить".into() } else { "Включить".into() }),
+                        active: t.proxy_on,
+                    });
+                    rows
+                }
+                .into_iter()
+                .chain(ctl.vpns
                     .iter()
-                    .take(layout::CTL_ROWS)
                     .map(|v| CtlRow {
                         icon: CtlIcon::Vpn,
                         title: v.name.clone(),
                         sub: if v.connected { "Подключён".into() } else { "Отключён".into() },
                         action: Some(if v.connected { "Отключить".into() } else { "Подключить".into() }),
                         active: v.connected,
-                    })
-                    .collect(),
+                    }))
+                .take(layout::CTL_ROWS)
+                .collect(),
                 "Нет VPN-подключений Windows — их добавляют в «Параметрах»".into(),
             ),
         };

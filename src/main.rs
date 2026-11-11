@@ -30,6 +30,7 @@ mod stats;
 mod text_tools;
 mod textinput;
 mod theme;
+mod throne;
 mod timer;
 mod translate;
 mod tray;

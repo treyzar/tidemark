@@ -72,6 +72,7 @@ pub struct State {
     pub networks: Vec<Network>,
     pub devices: Vec<Device>,
     pub vpns: Vec<Vpn>,
+    pub throne: crate::throne::Status,
     /// One-line outcome of the last action ("Подключено к …").
     pub message: String,
     pub busy: bool,
@@ -473,6 +474,9 @@ pub enum Command {
     Bluetooth { address: u64, connect: bool },
     VpnConnect(String),
     VpnDisconnect(String),
+    ThroneOpen,
+    /// Turn the Windows system proxy on/off.
+    Proxy(bool),
 }
 
 pub struct Service {
@@ -513,6 +517,7 @@ impl Service {
                                 s.networks = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
                                 s.devices = bt_devices().into_iter().map(|(d, _)| d).collect();
                                 s.vpns = vpns();
+                                s.throne = crate::throne::status();
                             }
                             post();
                             std::thread::sleep(Duration::from_millis(3500));
@@ -567,6 +572,18 @@ impl Service {
                             let ok = vpn_connect(&name);
                             set_msg(&if ok { format!("VPN «{name}» подключён") } else { format!("VPN «{name}»: нужен вход в параметрах Windows") }, false);
                         }
+                        Command::ThroneOpen => crate::throne::open(),
+                        Command::Proxy(on) => {
+                            let ok = crate::throne::set_proxy(on);
+                            set_msg(
+                                match (ok, on) {
+                                    (true, true) => "Системный прокси включён",
+                                    (true, false) => "Системный прокси выключен",
+                                    _ => "Не удалось изменить системный прокси",
+                                },
+                                false,
+                            );
+                        }
                         Command::VpnDisconnect(name) => {
                             vpn_disconnect(&name);
                             set_msg(&format!("VPN «{name}» отключён"), false);
@@ -579,6 +596,7 @@ impl Service {
                         s.networks = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
                         s.devices = bt_devices().into_iter().map(|(d, _)| d).collect();
                         s.vpns = vpns();
+                        s.throne = crate::throne::status();
                     }
                     post();
                 }
