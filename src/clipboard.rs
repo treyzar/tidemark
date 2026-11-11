@@ -268,12 +268,21 @@ pub fn write(hwnd: HWND, entry: &Entry) -> bool {
             Err(_) => return false,
         },
     };
+    write_raw(hwnd, fmt, &bytes)
+}
+
+/// Puts a screenshot on the clipboard as a bitmap.
+pub fn write_image(hwnd: HWND, img: &crate::capture::Image) -> bool {
+    write_raw(hwnd, CF_DIB.0 as u32, &img.to_dib())
+}
+
+fn write_raw(hwnd: HWND, fmt: u32, bytes: &[u8]) -> bool {
     let Some(_open) = Open::new(hwnd) else { return false };
     unsafe {
         if EmptyClipboard().is_err() {
             return false;
         }
-        let Some(handle) = global(&bytes) else { return false };
+        let Some(handle) = global(bytes) else { return false };
         // On success the system owns the memory.
         SetClipboardData(fmt, Some(handle)).is_ok()
     }

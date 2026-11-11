@@ -8,6 +8,7 @@ description = "Dynamic Island for Windows 11"
 windows-numerics = "0.2"
 windows-future = "0.2"
 windows-core = "0.61"
+rqrr = "0.9"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
@@ -17,7 +18,11 @@ version = "0.61"
 features = [
     "Foundation",
     "Foundation_Numerics",
+    "Graphics_Imaging",
     "Media_Control",
+    "Media_Ocr",
+    "Globalization",
+    "Security_Cryptography",
     "Storage_Streams",
     "Win32_Graphics_Imaging",
     "Win32_Globalization",
