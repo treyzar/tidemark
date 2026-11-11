@@ -16,11 +16,14 @@ mod layout;
 mod lyrics;
 mod legacy_players;
 mod media;
+mod notes;
 mod privacy;
 mod render;
 mod signals;
 mod stats;
+mod textinput;
 mod theme;
+mod timer;
 mod tray;
 mod weather;
 

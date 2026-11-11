@@ -279,6 +279,14 @@ pub fn write(hwnd: HWND, entry: &Entry) -> bool {
     }
 }
 
+/// Plain text on the clipboard (for pasting into the island's fields).
+pub fn read_text(hwnd: HWND) -> Option<String> {
+    let _open = Open::new(hwnd)?;
+    let raw = bytes_of(CF_UNICODETEXT.0 as u32)?;
+    let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
 pub fn listen(hwnd: HWND) {
     unsafe {
         let _ = AddClipboardFormatListener(hwnd);

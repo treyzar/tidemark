@@ -3,7 +3,8 @@
 //! drawn unless the island changes, so an idle island costs no CPU time.
 
 use crate::clip_history::Glyph;
-use crate::layout::{self, Hit, Placed, Rect, TileKind};
+use crate::layout::{self, Hit, Placed, Rect, Tab, TileKind};
+use crate::textinput::TextField;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::media::{Cover, COVER_PX};
@@ -74,6 +75,36 @@ pub struct Scene<'a> {
     pub privacy: (bool, bool),
     /// The active window tile.
     pub window: Option<&'a WindowView>,
+    /// Which view of the open island is shown.
+    pub tab: Tab,
+    pub notes: Option<&'a NotesView>,
+    /// Rows of the Clipboard tab.
+    pub clip_page: &'a [ClipRow],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimerUi {
+    Idle,
+    Running,
+    Paused,
+    Done,
+}
+
+/// Everything the Notes tab shows; part of the panel cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotesView {
+    pub note: TextField,
+    pub note_focus: bool,
+    pub remind: TextField,
+    pub remind_focus: bool,
+    /// Under the reminder field: an example, a preview or "не понял".
+    pub remind_hint: String,
+    /// (when, text) of the next reminders.
+    pub reminders: Vec<(String, String)>,
+    pub timer_text: String,
+    pub timer: TimerUi,
+    /// Index of the preset matching the timer's length, if any.
+    pub timer_preset: Option<usize>,
 }
 
 /// What the "active window" tile shows; part of the Home cache key.
@@ -100,6 +131,8 @@ pub enum Badge {
     Brightness,
     Camera,
     Mic,
+    Timer,
+    Bell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +157,8 @@ pub struct Toast {
     pub text: String,
     /// 0..1: draws a level bar instead of the second line of text.
     pub level: Option<f32>,
+    /// Buttons at the right ("Ещё раз", "✓"); the last is a round check.
+    pub actions: Vec<String>,
 }
 
 /// What the player shows; part of the Home layer's cache key.
@@ -156,6 +191,8 @@ pub struct Compact {
     pub media: Option<CompactMedia>,
     /// Shown instead of everything else while set.
     pub toast: Option<Toast>,
+    /// Countdown shown at the right while a timer runs.
+    pub timer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +215,9 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    tab: Tab,
+    notes: Option<NotesView>,
+    clip_page: Vec<ClipRow>,
     window: Option<WindowView>,
     clip_rows: Vec<ClipRow>,
     dock: Vec<u64>,
@@ -233,6 +273,9 @@ struct Fonts {
     small: IDWriteTextFormat,
     small_right: IDWriteTextFormat,
     lyric: IDWriteTextFormat,
+    note: IDWriteTextFormat,
+    big: IDWriteTextFormat,
+    tab: IDWriteTextFormat,
 }
 
 pub struct Renderer {
@@ -471,7 +514,24 @@ impl Renderer {
             small_right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
             let lyric = ellipsized(11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
             lyric.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            let note = self.dwrite.CreateTextFormat(
+                w!("Segoe UI Variable Text"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.0 * scale,
+                w!("ru-ru"),
+            )?;
+            note.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            let big = make(30.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            big.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let tab = make(12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            tab.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             self.fonts = Some(Fonts {
+                note,
+                big,
+                tab,
                 scale,
                 title,
                 hint,
@@ -661,8 +721,25 @@ impl Renderer {
                 let badge = D2D_RECT_F { left: 5.0 * k, top: 5.0 * k, right: 5.0 * k + side, bottom: 5.0 * k + side };
                 self.paint_badge(&t.badge, badge, k, th);
                 let text_l = badge.right + 9.0 * k;
-                let top = D2D_RECT_F { left: text_l, top: 3.0 * k, right: w - pad, bottom: h / 2.0 + 1.0 * k };
-                let bottom = D2D_RECT_F { left: text_l, top: h / 2.0 - 1.0 * k, right: w - pad, bottom: h - 3.0 * k };
+                let buttons = layout::toast_actions(w / k, h / k, &t.actions);
+                let text_r = buttons.first().map_or(w - pad, |b| b.x * k - 8.0 * k);
+                for (i, (b, label)) in buttons.iter().zip(&t.actions).enumerate() {
+                    let r = D2D_RECT_F { left: b.x * k, top: b.y * k, right: (b.x + b.w) * k, bottom: (b.y + b.h) * k };
+                    let last = i + 1 == t.actions.len();
+                    self.fill_rect(if last { th.accent } else { th.tile_hover }, r, (r.bottom - r.top) / 2.0);
+                    if last {
+                        // Check mark.
+                        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                        self.line([1.0; 4], cx - 5.0 * k, cy, cx - 1.5 * k, cy + 3.5 * k, 2.0 * k);
+                        self.line([1.0; 4], cx - 1.5 * k, cy + 3.5 * k, cx + 5.5 * k, cy - 4.0 * k, 2.0 * k);
+                    } else {
+                        self.brush.SetColor(&color(th.text, 1.0));
+                        let l: Vec<u16> = label.encode_utf16().collect();
+                        self.dc.DrawText(&l, &fonts.lyric, &r, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+                }
+                let top = D2D_RECT_F { left: text_l, top: 3.0 * k, right: text_r, bottom: h / 2.0 + 1.0 * k };
+                let bottom = D2D_RECT_F { left: text_l, top: h / 2.0 - 1.0 * k, right: text_r, bottom: h - 3.0 * k };
                 self.brush.SetColor(&color(th.text, 1.0));
                 let title: Vec<u16> = t.title.encode_utf16().collect();
                 self.dc.DrawText(&title, &fonts.pill_title, &top, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
@@ -695,14 +772,16 @@ impl Renderer {
                 let cover = D2D_RECT_F { left: 5.0 * k, top: 5.0 * k, right: 5.0 * k + side, bottom: 5.0 * k + side };
                 self.paint_cover(&cover, side / 2.0, th);
                 let clock = D2D_RECT_F { left: 0.0, top: 0.0, right: w - pad, bottom: h };
-                self.brush.SetColor(&color(th.text, 1.0));
-                let time: Vec<u16> = scene.compact.time.encode_utf16().collect();
+                self.brush.SetColor(&color(if scene.compact.timer.is_some() { th.accent } else { th.text }, 1.0));
+                let time: Vec<u16> = scene.compact.timer.as_deref().unwrap_or(&scene.compact.time).encode_utf16().collect();
                 self.dc.DrawText(&time, &fonts.compact_right, &clock, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 let text_l = cover.right + 9.0 * k;
                 let text_r = w - pad - 48.0 * k;
                 let t = D2D_RECT_F { left: text_l, top: 3.0 * k, right: text_r, bottom: h / 2.0 + 1.0 * k };
                 let a = D2D_RECT_F { left: text_l, top: h / 2.0 - 1.0 * k, right: text_r, bottom: h - 3.0 * k };
                 let title: Vec<u16> = title.encode_utf16().collect();
+                // The countdown above is drawn in the accent; the title is not.
+                self.brush.SetColor(&color(th.text, 1.0));
                 self.dc.DrawText(&title, &fonts.pill_title, &t, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 self.brush.SetColor(&color(if m.is_lyric { th.text } else { th.subtext }, 1.0));
                 let artist: Vec<u16> = artist.encode_utf16().collect();
@@ -712,7 +791,13 @@ impl Renderer {
             self.brush.SetColor(&color(th.text, 1.0));
             let time: Vec<u16> = scene.compact.time.encode_utf16().collect();
             self.dc.DrawText(&time, &fonts.compact, &full, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            if let Some((icon, day, temp)) = &scene.compact.weather {
+            if let Some(left) = &scene.compact.timer {
+                let right = D2D_RECT_F { left: 0.0, top: 0.0, right: w - pad, bottom: h };
+                self.brush.SetColor(&color(th.accent, 1.0));
+                let t: Vec<u16> = left.encode_utf16().collect();
+                self.dc.DrawText(&t, &fonts.compact_right, &right, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                self.paint_badge(&Badge::Timer, D2D_RECT_F { left: pad - 4.0 * k, top: h / 2.0 - 12.0 * k, right: pad + 20.0 * k, bottom: h / 2.0 + 12.0 * k }, k, th);
+            } else if let Some((icon, day, temp)) = &scene.compact.weather {
                 let right = D2D_RECT_F { left: 0.0, top: 0.0, right: w - pad, bottom: h };
                 let temp: Vec<u16> = temp.encode_utf16().collect();
                 self.dc.DrawText(&temp, &fonts.compact_right, &right, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
@@ -1044,6 +1129,22 @@ impl Renderer {
                 }
             }
             Badge::Brightness => self.paint_sun(cx, cy, k * 0.9),
+            Badge::Timer => {
+                unsafe {
+                    self.brush.SetColor(&color(ink, 1.0));
+                    let e = D2D1_ELLIPSE { point: pt(cx, cy + 1.0 * k), radiusX: 6.0 * k, radiusY: 6.0 * k };
+                    self.dc.DrawEllipse(&e, &self.brush, 1.5 * k, None);
+                }
+                self.line(ink, cx, cy + 1.0 * k, cx, cy - 2.5 * k, 1.5 * k);
+                self.line(ink, cx - 2.0 * k, cy - 7.0 * k, cx + 2.0 * k, cy - 7.0 * k, 1.5 * k);
+            }
+            Badge::Bell => {
+                self.fill_polygon(
+                    ink,
+                    &[(cx - 5.5 * k, cy + 3.5 * k), (cx - 4.0 * k, cy + 1.0 * k), (cx - 4.0 * k, cy - 2.5 * k), (cx - 2.0 * k, cy - 5.5 * k), (cx + 2.0 * k, cy - 5.5 * k), (cx + 4.0 * k, cy - 2.5 * k), (cx + 4.0 * k, cy + 1.0 * k), (cx + 5.5 * k, cy + 3.5 * k)],
+                );
+                self.fill_circle(ink, cx, cy + 5.5 * k, 1.6 * k);
+            }
             Badge::Camera => {
                 self.fill_rect(ink, D2D_RECT_F { left: cx - 6.5 * k, top: cy - 4.0 * k, right: cx + 2.5 * k, bottom: cy + 4.0 * k }, 1.5 * k);
                 self.fill_polygon(ink, &[(cx + 3.0 * k, cy - 1.0 * k), (cx + 7.0 * k, cy - 4.0 * k), (cx + 7.0 * k, cy + 4.0 * k), (cx + 3.0 * k, cy + 1.0 * k)]);
@@ -1247,6 +1348,9 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            tab: scene.tab,
+            notes: if scene.tab == Tab::Notes { scene.notes.cloned() } else { None },
+            clip_page: if scene.tab == Tab::Clipboard { scene.clip_page.to_vec() } else { Vec::new() },
             window: scene.window.cloned(),
             clip_rows: scene.clip_rows.to_vec(),
             dock: scene.dock.iter().map(|d| d.id).collect(),
@@ -1276,6 +1380,236 @@ impl Renderer {
 
     /// Paints the Home view with its top-left at (0, 0), fully opaque.
     fn paint_home(&self, scene: &Scene) {
+        self.paint_tabs(scene);
+        match scene.tab {
+            Tab::Home => self.paint_tiles(scene),
+            Tab::Clipboard => self.paint_clip_page(scene),
+            Tab::Notes => {
+                if let Some(n) = scene.notes {
+                    self.paint_notes(scene, n);
+                }
+            }
+        }
+    }
+
+    fn paint_tabs(&self, scene: &Scene) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let px = |rc: Rect| D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        for (tab, rc) in layout::tab_buttons(scene.tab) {
+            let r = px(rc);
+            let active = tab == scene.tab;
+            if active || scene.hot == Some(Hit::Tab(tab)) {
+                self.fill_rect(if active { th.tile_hover } else { th.tile }, r, 14.0 * k);
+            }
+            let icon = D2D_RECT_F { right: r.left + 34.0 * k, ..r };
+            let (cx, cy) = ((icon.left + icon.right) / 2.0, (icon.top + icon.bottom) / 2.0);
+            let ink = if active { th.text } else { th.subtext };
+            match tab {
+                Tab::Home => {
+                    self.fill_polygon(ink, &[(cx - 6.0 * k, cy - 0.5 * k), (cx, cy - 6.0 * k), (cx + 6.0 * k, cy - 0.5 * k)]);
+                    self.fill_rect(ink, D2D_RECT_F { left: cx - 4.5 * k, top: cy - 1.0 * k, right: cx + 4.5 * k, bottom: cy + 5.5 * k }, 1.0 * k);
+                }
+                Tab::Clipboard => {
+                    unsafe {
+                        self.brush.SetColor(&color(ink, 1.0));
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: cx - 5.0 * k, top: cy - 5.0 * k, right: cx + 5.0 * k, bottom: cy + 6.5 * k },
+                            radiusX: 1.5 * k,
+                            radiusY: 1.5 * k,
+                        };
+                        self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.4 * k, None);
+                    }
+                    self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy - 4.0 * k }, 1.0 * k);
+                }
+                Tab::Notes => {
+                    for (i, w) in [9.0, 9.0, 6.0].iter().enumerate() {
+                        let y = cy - 4.0 * k + i as f32 * 4.0 * k;
+                        self.line(ink, cx - 5.0 * k, y, cx - 5.0 * k + w * k, y, 1.5 * k);
+                    }
+                }
+            }
+            if active {
+                unsafe {
+                    self.brush.SetColor(&color(th.text, 1.0));
+                    let label = D2D_RECT_F { left: icon.right - 4.0 * k, ..r };
+                    let w: Vec<u16> = tab.title().encode_utf16().collect();
+                    self.dc.DrawText(&w, &fonts.tab, &label, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+            }
+        }
+    }
+
+    fn card(&self, rc: Rect, title: &str, k: f32, th: &Theme) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let r = D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        self.fill_rect(th.tile, r, 14.0 * k);
+        unsafe {
+            self.brush.SetColor(&color(th.subtext, 1.0));
+            let t = D2D_RECT_F { left: r.left + 12.0 * k, top: r.top + 9.0 * k, right: r.right - 12.0 * k, bottom: r.top + 28.0 * k };
+            let w: Vec<u16> = title.encode_utf16().collect();
+            self.dc.DrawText(&w, &fonts.title, &t, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
+
+    /// An input field: text (or a dim placeholder), selection and caret.
+    fn paint_field(&self, field: &TextField, rc: Rect, focused: bool, placeholder: &str, fmt: &IDWriteTextFormat, boxed: bool, k: f32, th: &Theme) {
+        let r = D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        let pad = if boxed { 8.0 * k } else { 0.0 };
+        if boxed {
+            self.fill_rect(if focused { th.tile_hover } else { th.tile }, r, 8.0 * k);
+            if focused {
+                unsafe {
+                    self.brush.SetColor(&color(th.accent, 0.8));
+                    let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: 8.0 * k, radiusY: 8.0 * k };
+                    self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.2 * k, None);
+                }
+            }
+        }
+        let inner_w = (r.right - r.left - 2.0 * pad).max(1.0);
+        let inner_h = (r.bottom - r.top).max(1.0);
+        let shown = if field.is_empty() { placeholder } else { &field.text };
+        let wide: Vec<u16> = shown.encode_utf16().collect();
+        unsafe {
+            let Ok(layout) = self.dwrite.CreateTextLayout(&wide, fmt, inner_w, inner_h) else { return };
+            let origin = pt(r.left + pad, r.top);
+            self.dc.PushAxisAlignedClip(&r, D2D1_ANTIALIAS_MODE_ALIASED);
+            if focused && !field.is_empty() {
+                if let Some((start, len)) = field.selection_utf16() {
+                    let mut count = 0u32;
+                    let _ = layout.HitTestTextRange(start, len, 0.0, 0.0, None, &mut count);
+                    let mut metrics = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+                    if count > 0 && layout.HitTestTextRange(start, len, 0.0, 0.0, Some(&mut metrics), &mut count).is_ok() {
+                        let mut sel = th.accent;
+                        sel[3] = 0.35;
+                        for m in &metrics {
+                            self.fill_rect(sel, D2D_RECT_F { left: origin.X + m.left, top: origin.Y + m.top, right: origin.X + m.left + m.width, bottom: origin.Y + m.top + m.height }, 0.0);
+                        }
+                    }
+                }
+            }
+            self.brush.SetColor(&color(if field.is_empty() { th.subtext } else { th.text }, 1.0));
+            self.dc.DrawTextLayout(origin, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if focused {
+                let pos = if field.is_empty() { 0 } else { field.caret_utf16() };
+                let (mut x, mut y) = (0.0f32, 0.0f32);
+                let mut m = DWRITE_HIT_TEST_METRICS::default();
+                if layout.HitTestTextPosition(pos, false, &mut x, &mut y, &mut m).is_ok() {
+                    let line_h = if m.height > 0.0 { m.height } else { 16.0 * k };
+                    self.fill_rect(th.accent, D2D_RECT_F { left: origin.X + x, top: origin.Y + y, right: origin.X + x + 1.5 * k, bottom: origin.Y + y + line_h }, 0.0);
+                }
+            }
+            self.dc.PopAxisAlignedClip();
+        }
+    }
+
+    fn paint_notes(&self, scene: &Scene, n: &NotesView) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let r = layout::notes_regions(scene.panel_size.0);
+        let px = |rc: Rect| D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        let text = |s: &str, fmt: &IDWriteTextFormat, rc: Rect, c: Rgba| unsafe {
+            self.brush.SetColor(&color(c, 1.0));
+            let w: Vec<u16> = s.encode_utf16().collect();
+            self.dc.DrawText(&w, fmt, &px(rc), &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        };
+
+        // Note.
+        self.card(r.note_card, "Заметка", k, th);
+        self.paint_field(&n.note, r.note, n.note_focus, "Кликните и пишите — сохраняется само", &fonts.note, false, k, th);
+
+        // Timer.
+        let title = match n.timer {
+            TimerUi::Done => "Таймер · время вышло",
+            TimerUi::Paused => "Таймер · пауза",
+            _ => "Таймер",
+        };
+        self.card(r.timer_card, title, k, th);
+        let ink = if n.timer == TimerUi::Running { th.accent } else { th.text };
+        text(&n.timer_text, &fonts.big, r.timer_text, ink);
+        for (hit, rc) in [(Hit::TimerToggle, r.toggle), (Hit::TimerReset, r.reset)] {
+            let b = px(rc);
+            let fill = if scene.hot == Some(hit) { th.tile_hover } else { th.tile };
+            self.fill_rect(fill, b, (b.bottom - b.top) / 2.0);
+            let (cx, cy) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+            match hit {
+                Hit::TimerToggle => {
+                    let glyph = if n.timer == TimerUi::Running { Transport::Pause } else { Transport::Play };
+                    self.paint_transport(glyph, b, k * 0.85, th.text);
+                }
+                _ => self.fill_rect(th.text, D2D_RECT_F { left: cx - 4.5 * k, top: cy - 4.5 * k, right: cx + 4.5 * k, bottom: cy + 4.5 * k }, 1.5 * k),
+            }
+        }
+        for (i, rc) in r.presets.iter().enumerate() {
+            let b = px(*rc);
+            let on = n.timer_preset == Some(i);
+            let fill = if on { th.accent } else if scene.hot == Some(Hit::TimerPreset(i)) { th.tile_hover } else { th.tile_hover };
+            let mut fill = fill;
+            if !on {
+                fill[3] *= 0.7;
+            }
+            self.fill_rect(fill, b, 8.0 * k);
+            let label = crate::timer::length_label(std::time::Duration::from_secs(layout::TIMER_PRESETS[i]));
+            text(&label, &fonts.lyric, *rc, if on { [1.0; 4] } else { th.text });
+        }
+
+        // Reminders.
+        self.card(r.remind_card, "Напоминания", k, th);
+        self.paint_field(&n.remind, r.remind, n.remind_focus, "через 15 мин купить хлеб", &fonts.track_artist, true, k, th);
+        text(&n.remind_hint, &fonts.small, r.remind_hint, th.subtext);
+        if n.reminders.is_empty() {
+            let first = r.rows[0];
+            text("Пока ничего не запланировано", &fonts.small, Rect { x: first.x + 6.0, ..first }, th.subtext);
+        }
+        for (i, ((when, what), (row, rm))) in n.reminders.iter().zip(r.rows.iter().zip(&r.removes)).enumerate() {
+            if scene.hot == Some(Hit::RemindRemove(i)) {
+                self.fill_rect(th.tile_hover, px(*row), 6.0 * k);
+            }
+            let w = Rect { x: row.x + 6.0, w: 86.0, ..*row };
+            text(when, &fonts.small, w, th.accent);
+            let t = Rect { x: row.x + 96.0, w: row.w - 96.0 - 26.0, ..*row };
+            text(what, &fonts.track_artist, t, th.text);
+            let b = px(*rm);
+            let (cx, cy) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+            self.line(th.subtext, cx - 3.5 * k, cy - 3.5 * k, cx + 3.5 * k, cy + 3.5 * k, 1.3 * k);
+            self.line(th.subtext, cx + 3.5 * k, cy - 3.5 * k, cx - 3.5 * k, cy + 3.5 * k, 1.3 * k);
+        }
+    }
+
+    fn paint_clip_page(&self, scene: &Scene) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let w = scene.panel_size.0;
+        if scene.clip_page.is_empty() {
+            let area = Rect { x: layout::PAD, y: layout::TAB_BAR_H, w: w - 2.0 * layout::PAD, h: layout::PAGE_H - layout::PAD };
+            unsafe {
+                self.brush.SetColor(&color(th.subtext, 1.0));
+                let s: Vec<u16> = "История пуста — скопируйте что-нибудь".encode_utf16().collect();
+                let r = D2D_RECT_F { left: area.x * k, top: area.y * k, right: (area.x + area.w) * k, bottom: (area.y + area.h) * k };
+                self.dc.DrawText(&s, &fonts.lyric, &r, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            return;
+        }
+        for (i, (row, slot)) in scene.clip_page.iter().zip(layout::clip_page_rows()).enumerate() {
+            let rc = Rect { w: w - 2.0 * layout::PAD, ..slot };
+            let r = D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+            self.fill_rect(if scene.hot == Some(Hit::Clip(i)) { th.tile_hover } else { th.tile }, r, 10.0 * k);
+            let cy = (r.top + r.bottom) / 2.0;
+            self.paint_glyph(row.glyph, r.left + 18.0 * k, cy, k * 0.9, th);
+            unsafe {
+                let ago = D2D_RECT_F { left: r.right - 70.0 * k, right: r.right - 12.0 * k, top: cy - 7.0 * k, bottom: cy + 7.0 * k };
+                self.brush.SetColor(&color(th.subtext, 1.0));
+                let a: Vec<u16> = row.ago.encode_utf16().collect();
+                self.dc.DrawText(&a, &fonts.small_right, &ago, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let t = D2D_RECT_F { left: r.left + 36.0 * k, right: ago.left - 6.0 * k, ..r };
+                self.brush.SetColor(&color(th.text, 1.0));
+                let s: Vec<u16> = row.text.encode_utf16().collect();
+                self.dc.DrawText(&s, &fonts.track_artist, &t, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        }
+    }
+
+    fn paint_tiles(&self, scene: &Scene) {
         let fonts = self.fonts.as_ref().unwrap();
         let k = scene.scale;
         let th = scene.theme;

@@ -55,6 +55,11 @@ fn parse_stamp(tag: &str) -> Option<Duration> {
     let (m, s) = tag.split_once(':')?;
     let minutes: u64 = m.trim().parse().ok()?;
     let (sec, frac) = s.split_once('.').unwrap_or((s, ""));
+    // Lyrics come from a remote server: never slice untrusted text at a
+    // byte offset that may not be a char boundary.
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let seconds: u64 = sec.trim().parse().ok()?;
     if seconds >= 60 {
         return None;
@@ -255,6 +260,11 @@ mod tests {
         assert_eq!(parse_stamp("01:02.5"), Some(Duration::from_millis(62500)));
         assert_eq!(parse_stamp("ar"), None);
         assert_eq!(parse_stamp("00:75.00"), None);
+        // Malformed remote data must be rejected, not panic.
+        assert_eq!(parse_stamp("00:01.1€"), None);
+        assert_eq!(parse_stamp("00:01.€€€€"), None);
+        assert_eq!(parse_stamp("00:01.12x"), None);
+        assert!(parse_lrc("[00:01.é] x\n[00:02.00] ok").len() == 1);
     }
 
     #[test]

@@ -12,12 +12,15 @@ use crate::signals::{self, Signals, WM_VOLUME};
 use crate::beat::{self, WM_BEAT};
 use crate::config::Config;
 use crate::clip_history::{self, Entry, History};
-use crate::layout::{self, Hit, Placed, TileKind};
+use crate::layout::{self, Hit, Placed, Rect, Tab, TileKind};
+use crate::notes::{self, Reminder};
+use crate::textinput::TextField;
+use crate::timer::{self, Timer};
 use crate::fullscreen::{self, ABN_FULLSCREENAPP, WM_APPBAR, WM_FOREGROUND};
 use crate::{clipboard, dock};
 use crate::media::{self, Command, MediaState, WM_MEDIA};
 use crate::lyrics::{self, Lines, WM_LYRICS};
-use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, Renderer, Scene, Shape, Toast, WindowView};
+use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, Shape, TimerUi, Toast, WindowView};
 use crate::stats::Stats;
 use crate::theme::Theme;
 use crate::tray::{self, TrayAction};
@@ -71,6 +74,20 @@ const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
 /// One layout check shortly after a layout chord is released.
 const TIMER_LAYOUT: usize = 11;
 const LAYOUT_CHECK_MS: u32 = 120;
+/// Ticks the countdown once a second while a timer runs.
+const TIMER_COUNTDOWN: usize = 12;
+/// One-shot at the moment the timer ends.
+const TIMER_TIMER_END: usize = 13;
+/// One-shot at the next reminder (re-armed at most an hour ahead).
+const TIMER_REMINDER: usize = 14;
+/// Bounces the island while an alarm waits to be dismissed.
+const TIMER_ALARM_PULSE: usize = 15;
+const ALARM_PULSE_MS: u32 = 1100;
+const ALARM_PULSES: u32 = 20;
+/// Saves the note shortly after typing stops.
+const TIMER_NOTE_SAVE: usize = 16;
+/// Home tiles start below the tab row.
+const HOME_OFFSET: f32 = layout::TAB_BAR_H - layout::PAD;
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
 const MENU_REMOVE: usize = 1;
 const MENU_CLEAR: usize = 2;
@@ -162,6 +179,34 @@ pub struct Island {
     extra_icons: Vec<DockIcon>,
     /// (foreground window, its keyboard layout) at the last check.
     layout: (isize, isize),
+    tab: Tab,
+    /// Content height of the Home tab (tiles + tab row).
+    home_height: f32,
+    store: notes::Store,
+    note: TextField,
+    remind: TextField,
+    focus: Focus,
+    timer: Timer,
+    notes_view: Option<NotesView>,
+    clip_page: Vec<ClipRow>,
+    /// A timer or reminder alarm waits in the pill until dismissed.
+    alarm: Option<Alarm>,
+    alarm_pulses: u32,
+    /// High surrogate of a character arriving in two WM_CHARs.
+    pending_surrogate: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    None,
+    Note,
+    Remind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Alarm {
+    Timer,
+    Reminder(String),
 }
 
 thread_local! {
@@ -235,7 +280,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             dirty: true,
             last_frame: None,
             stats: Stats::new(),
-            compact: Compact { time: clock_text(), weather: None, media: None, toast: None },
+            compact: Compact { time: clock_text(), weather: None, media: None, toast: None, timer: None },
             weather: None,
             media_service: None,
             media: None,
@@ -266,6 +311,18 @@ pub fn create(cfg: Config) -> Result<HWND> {
             app_icons: Vec::new(),
             extra_icons: Vec::new(),
             layout: signals::foreground_layout(),
+            tab: Tab::Home,
+            home_height: 0.0,
+            store: notes::Store::load(),
+            note: TextField::new(true),
+            remind: TextField::new(false),
+            focus: Focus::None,
+            timer: Timer::default(),
+            notes_view: None,
+            clip_page: Vec::new(),
+            alarm: None,
+            alarm_pulses: 0,
+            pending_surrogate: None,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -279,6 +336,10 @@ pub fn create(cfg: Config) -> Result<HWND> {
             island.privacy = privacy::Watcher::start(hwnd);
             island.in_use = island.privacy.as_ref().map(|p| p.get()).unwrap_or_default();
         }
+        island.note = TextField::with_text(&island.store.note, true);
+        island.note.caret = island.note.len();
+        island.refresh_notes_view();
+        island.arm_reminders();
         island.active = active_app::current();
         island.refresh_window_view();
         island.refresh_clip_rows();
@@ -397,12 +458,17 @@ impl Island {
     /// the primary monitor, sized for the expanded state at the current DPI.
     fn layout(&mut self) {
         let kinds = layout::tiles_from_ids(&self.cfg.home_tiles);
-        let (tiles, panel_height) = layout::pack(&kinds, self.cfg.expanded_width);
+        let (mut tiles, home_height) = layout::pack(&kinds, self.cfg.expanded_width);
+        for t in &mut tiles {
+            t.y += HOME_OFFSET;
+        }
         self.tiles = tiles;
-        self.panel_height = panel_height;
+        self.home_height = home_height + HOME_OFFSET;
+        self.panel_height = self.tab_height(self.tab);
+        let panel_height = self.home_height.max(layout::TAB_BAR_H + layout::PAGE_H);
         self.hovered_tile = None;
         if self.hovered {
-            self.height.target = panel_height;
+            self.height.target = self.panel_height;
         }
         unsafe {
             let dpi = GetDpiForWindow(self.hwnd).max(96);
@@ -477,7 +543,7 @@ impl Island {
     }
 
     fn set_hover(&mut self, hovered: bool) {
-        if self.hovered == hovered {
+        if self.hovered == hovered || (!hovered && self.focus != Focus::None) {
             return;
         }
         self.hovered = hovered;
@@ -721,6 +787,42 @@ impl Island {
         let shape = self.shape();
         let (ox, oy) = self.panel_origin(&shape);
         let (dx, dy) = ((x as f32 - ox) / self.scale, (y as f32 - oy) / self.scale);
+        if dy < layout::TAB_BAR_H {
+            return layout::tab_buttons(self.tab).into_iter().find(|(_, r)| r.contains(dx, dy)).map(|(t, _)| Hit::Tab(t));
+        }
+        match self.tab {
+            Tab::Home => {}
+            Tab::Clipboard => {
+                let w = self.cfg.expanded_width - 2.0 * layout::PAD;
+                return layout::clip_page_rows()
+                    .iter()
+                    .take(self.clip_page.len())
+                    .position(|r| Rect { w, ..*r }.contains(dx, dy))
+                    .map(Hit::Clip);
+            }
+            Tab::Notes => {
+                let r = layout::notes_regions(self.cfg.expanded_width);
+                if r.toggle.contains(dx, dy) {
+                    return Some(Hit::TimerToggle);
+                }
+                if r.reset.contains(dx, dy) {
+                    return Some(Hit::TimerReset);
+                }
+                if let Some(i) = r.presets.iter().position(|p| p.contains(dx, dy)) {
+                    return Some(Hit::TimerPreset(i));
+                }
+                if r.remind.contains(dx, dy) {
+                    return Some(Hit::RemindField);
+                }
+                if let Some(i) = r.removes.iter().take(self.store.reminders.len()).position(|p| p.contains(dx, dy)) {
+                    return Some(Hit::RemindRemove(i));
+                }
+                if r.note_card.contains(dx, dy) {
+                    return Some(Hit::NoteField);
+                }
+                return None;
+            }
+        }
         let tile = self.tiles.iter().find(|t| t.contains(dx, dy))?;
         match tile.kind {
             TileKind::Media => {
@@ -776,6 +878,35 @@ impl Island {
                 return true;
             }
             Some(Hit::Clip(i)) => self.recopy(i),
+            Some(Hit::Tab(t)) => self.switch_tab(t),
+            Some(Hit::NoteField) => self.set_focus(Focus::Note),
+            Some(Hit::RemindField) => self.set_focus(Focus::Remind),
+            Some(Hit::TimerPreset(i)) => {
+                self.timer.start(Duration::from_secs(layout::TIMER_PRESETS[i]), Instant::now());
+                self.timer_changed();
+            }
+            Some(Hit::TimerToggle) => {
+                if self.alarm == Some(Alarm::Timer) {
+                    self.dismiss_alarm();
+                }
+                self.timer.toggle(Instant::now());
+                self.timer_changed();
+            }
+            Some(Hit::TimerReset) => {
+                if self.alarm == Some(Alarm::Timer) {
+                    self.dismiss_alarm();
+                }
+                self.timer.reset();
+                self.timer_changed();
+            }
+            Some(Hit::RemindRemove(i)) => {
+                if i < self.store.reminders.len() {
+                    self.store.reminders.remove(i);
+                    self.store.save();
+                    self.arm_reminders();
+                    self.refresh_notes_view();
+                }
+            }
             Some(Hit::Dock(i)) => {
                 if let Some(app) = self.dock_apps.get(i) {
                     dock::launch(&app.path);
@@ -809,9 +940,374 @@ impl Island {
                     self.load_dock();
                 }
             }
-            None => {}
+            None => {
+                // A click elsewhere ends typing.
+                self.set_focus(Focus::None);
+            }
         }
         false
+    }
+
+    fn tab_height(&self, tab: Tab) -> f32 {
+        match tab {
+            Tab::Home => self.home_height,
+            _ => layout::TAB_BAR_H + layout::PAGE_H,
+        }
+    }
+
+    fn switch_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        self.set_focus(Focus::None);
+        self.tab = tab;
+        self.panel_height = self.tab_height(tab);
+        if self.hovered {
+            self.height.target = self.panel_height;
+        }
+        self.hot = None;
+        self.wobble.velocity += 25.0;
+        self.dirty = true;
+        self.last_frame = None;
+        if tab == Tab::Clipboard {
+            self.refresh_clip_rows();
+        }
+    }
+
+    fn set_focus(&mut self, focus: Focus) {
+        if focus == self.focus {
+            return;
+        }
+        if self.focus == Focus::Note {
+            self.save_note();
+        }
+        self.focus = focus;
+        if focus != Focus::None {
+            // Typing needs the keyboard: make the island the active window.
+            unsafe {
+                let _ = SetForegroundWindow(self.hwnd);
+                let _ = SetFocus(Some(self.hwnd));
+            }
+        }
+        self.refresh_notes_view();
+    }
+
+    fn field(&mut self) -> Option<&mut TextField> {
+        match self.focus {
+            Focus::Note => Some(&mut self.note),
+            Focus::Remind => Some(&mut self.remind),
+            Focus::None => None,
+        }
+    }
+
+    fn after_edit(&mut self) {
+        if self.focus == Focus::Note {
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_NOTE_SAVE, 800, None);
+            }
+        }
+        self.refresh_notes_view();
+    }
+
+    fn save_note(&mut self) {
+        if self.store.note != self.note.text {
+            self.store.note = self.note.text.clone();
+            self.store.save();
+        }
+    }
+
+    /// A typed character (WM_CHAR).
+    fn char_input(&mut self, unit: u16) {
+        if self.focus == Focus::None {
+            return;
+        }
+        let ch = if (0xD800..0xDC00).contains(&unit) {
+            self.pending_surrogate = Some(unit);
+            return;
+        } else if (0xDC00..0xE000).contains(&unit) {
+            let Some(high) = self.pending_surrogate.take() else { return };
+            char::decode_utf16([high, unit]).next().and_then(|r| r.ok())
+        } else {
+            char::from_u32(unit as u32)
+        };
+        let Some(ch) = ch.filter(|c| !c.is_control()) else { return };
+        if let Some(f) = self.field() {
+            f.insert(&ch.to_string());
+        }
+        self.after_edit();
+    }
+
+    /// Editing keys (WM_KEYDOWN). Returns true if handled.
+    fn key_down(&mut self, vk: u16) -> bool {
+        if self.focus == Focus::None {
+            return false;
+        }
+        let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
+        let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
+        let hwnd = self.hwnd;
+        let multiline = self.focus == Focus::Note;
+        match VIRTUAL_KEY(vk) {
+            VK_ESCAPE => {
+                self.set_focus(Focus::None);
+                unsafe {
+                    SetTimer(Some(hwnd), TIMER_COLLAPSE, COLLAPSE_DELAY_MS, None);
+                }
+                return true;
+            }
+            VK_RETURN if !multiline => {
+                self.submit_reminder();
+                return true;
+            }
+            _ => {}
+        }
+        let Some(f) = self.field() else { return false };
+        match VIRTUAL_KEY(vk) {
+            VK_RETURN => f.insert("\n"),
+            VK_BACK => f.backspace(ctrl),
+            VK_DELETE => f.delete(ctrl),
+            VK_LEFT => f.left(ctrl, shift),
+            VK_RIGHT => f.right(ctrl, shift),
+            VK_HOME => f.home(shift),
+            VK_END => f.end(shift),
+            VK_UP if multiline => f.vertical(false, shift),
+            VK_DOWN if multiline => f.vertical(true, shift),
+            VK_A if ctrl => f.select_all(),
+            VK_C | VK_X if ctrl => {
+                if let Some(text) = f.selected_text() {
+                    if vk == VK_X.0 {
+                        f.delete(false);
+                    }
+                    clipboard::write(hwnd, &Entry::Text { text });
+                }
+            }
+            VK_V if ctrl => {
+                if let Some(text) = clipboard::read_text(hwnd) {
+                    f.insert(&text);
+                }
+            }
+            _ => return false,
+        }
+        self.after_edit();
+        true
+    }
+
+    fn since_midnight() -> u64 {
+        let t = unsafe { GetLocalTime() };
+        t.wHour as u64 * 3600 + t.wMinute as u64 * 60 + t.wSecond as u64
+    }
+
+    fn submit_reminder(&mut self) {
+        let now = unix_now();
+        if let Some((at, text)) = notes::parse(&self.remind.text, now, Self::since_midnight()) {
+            self.store.add(Reminder { at, text });
+            self.store.save();
+            self.remind.clear();
+            self.arm_reminders();
+        }
+        self.refresh_notes_view();
+    }
+
+    /// Wakes up at the next reminder (at most an hour ahead, then re-checks).
+    fn arm_reminders(&self) {
+        unsafe {
+            match self.store.next_due() {
+                Some(at) => {
+                    let ms = at.saturating_sub(unix_now()).min(3600) * 1000 + 200;
+                    SetTimer(Some(self.hwnd), TIMER_REMINDER, ms as u32, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_REMINDER);
+                }
+            }
+        }
+    }
+
+    fn reminders_due(&mut self) {
+        let due = self.store.take_due(unix_now());
+        if !due.is_empty() {
+            self.store.save();
+            let text = if due.len() == 1 { due[0].text.clone() } else { format!("{} и ещё {}", due[0].text, due.len() - 1) };
+            self.raise_alarm(Alarm::Reminder(text));
+        }
+        self.arm_reminders();
+        self.refresh_notes_view();
+    }
+
+    fn timer_changed(&mut self) {
+        unsafe {
+            if let timer::State::Running { ends } = self.timer.state {
+                let ms = ends.saturating_duration_since(Instant::now()).as_millis() as u32 + 30;
+                SetTimer(Some(self.hwnd), TIMER_TIMER_END, ms, None);
+                SetTimer(Some(self.hwnd), TIMER_COUNTDOWN, 1000, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_TIMER_END);
+                let _ = KillTimer(Some(self.hwnd), TIMER_COUNTDOWN);
+            }
+        }
+        self.countdown_tick();
+    }
+
+    /// Countdown text in the pill and the Notes tab.
+    fn countdown_tick(&mut self) {
+        let running = self.timer.running();
+        let label = running.then(|| timer::clock(self.timer.left(Instant::now())));
+        let width_change = label.is_some() != self.compact.timer.is_some();
+        if label != self.compact.timer {
+            self.compact.timer = label;
+            self.dirty = true;
+        }
+        if width_change {
+            self.retarget_collapsed();
+        }
+        self.refresh_notes_view();
+    }
+
+    fn timer_ended(&mut self) {
+        if self.timer.check_done(Instant::now()) {
+            self.timer_changed();
+            self.raise_alarm(Alarm::Timer);
+        } else {
+            self.timer_changed(); // Fired early: re-arm for the rest.
+        }
+    }
+
+    /// Shows an alarm in the pill until dismissed, beeps and bounces.
+    fn raise_alarm(&mut self, alarm: Alarm) {
+        let toast = match &alarm {
+            Alarm::Timer => Toast {
+                badge: Badge::Timer,
+                title: "Время вышло".into(),
+                text: format!("Таймер · {}", timer::length_label(self.timer.length)),
+                level: None,
+                actions: vec!["Ещё раз".into(), "✓".into()],
+            },
+            Alarm::Reminder(text) => Toast {
+                badge: Badge::Bell,
+                title: "Напоминание".into(),
+                text: text.clone(),
+                level: None,
+                actions: vec!["+10 мин".into(), "✓".into()],
+            },
+        };
+        self.alarm = Some(alarm);
+        if self.fullscreen {
+            self.slide_in();
+        }
+        self.compact.toast = Some(toast);
+        self.retarget_collapsed();
+        self.wobble.velocity += 120.0;
+        self.dirty = true;
+        self.last_frame = None;
+        self.alarm_pulses = 0;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_TOAST);
+            SetTimer(Some(self.hwnd), TIMER_ALARM_PULSE, ALARM_PULSE_MS, None);
+            let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK);
+        }
+    }
+
+    fn alarm_pulse(&mut self) {
+        self.alarm_pulses += 1;
+        if self.alarm.is_none() || self.alarm_pulses > ALARM_PULSES {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_ALARM_PULSE);
+            }
+            return;
+        }
+        if !self.hovered {
+            // The island bristles until someone notices.
+            self.wobble.velocity += 110.0;
+            self.last_frame = None;
+        }
+        if self.alarm_pulses % 4 == 0 && self.alarm_pulses <= 8 {
+            unsafe {
+                let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK);
+            }
+        }
+    }
+
+    fn dismiss_alarm(&mut self) {
+        self.alarm = None;
+        self.compact.toast = None;
+        self.retarget_collapsed();
+        self.dirty = true;
+        self.last_frame = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_ALARM_PULSE);
+        }
+    }
+
+    /// Button `i` of the alarm in the pill.
+    fn alarm_action(&mut self, i: usize) {
+        let Some(alarm) = self.alarm.clone() else { return };
+        let last = self.compact.toast.as_ref().map_or(0, |t| t.actions.len().saturating_sub(1));
+        self.dismiss_alarm();
+        if i == last {
+            if alarm == Alarm::Timer {
+                self.timer.reset();
+                self.timer_changed();
+            }
+            return;
+        }
+        match alarm {
+            Alarm::Timer => {
+                self.timer.start(self.timer.length, Instant::now());
+                self.timer_changed();
+            }
+            Alarm::Reminder(text) => {
+                self.store.add(Reminder { at: unix_now() + 600, text });
+                self.store.save();
+                self.arm_reminders();
+                self.refresh_notes_view();
+            }
+        }
+    }
+
+    /// Alarm button under (x, y) client pixels while collapsed.
+    fn toast_action_at(&self, x: i32, y: i32) -> Option<usize> {
+        if self.hovered || self.alarm.is_none() {
+            return None;
+        }
+        let t = self.compact.toast.as_ref()?;
+        let shape = self.shape();
+        let (lx, ly) = ((x as f32 - shape.left) / self.scale, (y as f32 - shape.top) / self.scale);
+        layout::toast_actions(shape.width / self.scale, shape.height / self.scale, &t.actions)
+            .iter()
+            .position(|r| r.contains(lx, ly))
+    }
+
+    fn refresh_notes_view(&mut self) {
+        let now = unix_now();
+        let since = Self::since_midnight();
+        let hint = if self.remind.is_empty() {
+            "Например: «в 18:30 позвонить» и Enter".to_string()
+        } else {
+            match notes::parse(&self.remind.text, now, since) {
+                Some((at, text)) => format!("Enter — «{text}» {}", notes::when_label(at, now, since)),
+                None => "Не понял время — начните с «через» или «в»".to_string(),
+            }
+        };
+        let preset = layout::TIMER_PRESETS.iter().position(|&p| Duration::from_secs(p) == self.timer.length);
+        let view = NotesView {
+            note: self.note.clone(),
+            note_focus: self.focus == Focus::Note,
+            remind: self.remind.clone(),
+            remind_focus: self.focus == Focus::Remind,
+            remind_hint: hint,
+            reminders: self.store.reminders.iter().take(3).map(|r| (notes::when_label(r.at, now, since), r.text.clone())).collect(),
+            timer_text: timer::clock(self.timer.left(Instant::now())),
+            timer: match self.timer.state {
+                timer::State::Idle => TimerUi::Idle,
+                timer::State::Running { .. } => TimerUi::Running,
+                timer::State::Paused { .. } => TimerUi::Paused,
+                timer::State::Done => TimerUi::Done,
+            },
+            timer_preset: preset,
+        };
+        if Some(&view) != self.notes_view.as_ref() {
+            self.notes_view = Some(view);
+            self.dirty = true;
+        }
     }
 
     /// Right-click menu for clipboard rows and dock apps.
@@ -877,14 +1373,19 @@ impl Island {
             .history
             .items
             .iter()
-            .take(3)
+            .take(8)
             .map(|i| {
                 let (glyph, text) = clip_history::label(&i.entry);
                 ClipRow { glyph, text, ago: clip_history::ago(i.copied_at, now) }
             })
             .collect();
-        if rows != self.clip_rows {
-            self.clip_rows = rows;
+        let home: Vec<ClipRow> = rows.iter().take(3).cloned().collect();
+        if home != self.clip_rows {
+            self.clip_rows = home;
+            self.dirty = true;
+        }
+        if rows != self.clip_page {
+            self.clip_page = rows;
             self.dirty = true;
         }
     }
@@ -902,7 +1403,7 @@ impl Island {
         self.history.save();
         self.refresh_clip_rows();
         if !self.hovered {
-            self.show_toast(Toast { badge: Badge::Glyph(glyph), title: "Скопировано".into(), text, level: None }, TOAST_MS);
+            self.show_toast(Toast { badge: Badge::Glyph(glyph), title: "Скопировано".into(), text, level: None, actions: Vec::new() }, TOAST_MS);
         }
     }
 
@@ -916,8 +1417,8 @@ impl Island {
     }
 
     fn show_toast(&mut self, toast: Toast, ms: u32) {
-        if self.fullscreen || self.hovered {
-            return; // Never over a full-screen app; the open panel says enough.
+        if self.fullscreen || self.hovered || self.alarm.is_some() {
+            return; // Not over a full-screen app, the open panel, or an alarm.
         }
         // A new notice bounces the island; updates of the same one (volume
         // being dragged) just redraw.
@@ -954,7 +1455,7 @@ impl Island {
         if announce && switched && self.cfg.show_active_app && !self.handle_mode() {
             let badge = icon.map_or(Badge::Glyph(clip_history::Glyph::Files), Badge::App);
             let text = if app.title != app.name { app.title.clone() } else { String::new() };
-            self.show_toast(Toast { badge, title: app.name.clone(), text, level: None }, APP_TOAST_MS);
+            self.show_toast(Toast { badge, title: app.name.clone(), text, level: None, actions: Vec::new() }, APP_TOAST_MS);
         }
         self.active = Some(app);
         self.refresh_window_view();
@@ -992,14 +1493,14 @@ impl Island {
             return;
         }
         let (badge, title) = if muted || level <= 0.0 { (Badge::Muted, "Звук выключен") } else { (Badge::Volume, "Громкость") };
-        self.show_toast(Toast { badge, title: title.into(), text: String::new(), level: Some(if muted { 0.0 } else { level }) }, LEVEL_TOAST_MS);
+        self.show_toast(Toast { badge, title: title.into(), text: String::new(), level: Some(if muted { 0.0 } else { level }), actions: Vec::new() }, LEVEL_TOAST_MS);
     }
 
     fn brightness_changed(&mut self, percent: u32) {
         if !self.cfg.osd {
             return;
         }
-        self.show_toast(Toast { badge: Badge::Brightness, title: "Яркость".into(), text: String::new(), level: Some(percent as f32 / 100.0) }, LEVEL_TOAST_MS);
+        self.show_toast(Toast { badge: Badge::Brightness, title: "Яркость".into(), text: String::new(), level: Some(percent as f32 / 100.0), actions: Vec::new() }, LEVEL_TOAST_MS);
     }
 
     /// Announces a layout switch inside the same window (switching windows
@@ -1017,7 +1518,7 @@ impl Island {
             return;
         }
         let (code, name) = signals::layout_name(hkl);
-        self.show_toast(Toast { badge: Badge::Text(code), title: name, text: "Раскладка клавиатуры".into(), level: None }, KEY_TOAST_MS);
+        self.show_toast(Toast { badge: Badge::Text(code), title: name, text: "Раскладка клавиатуры".into(), level: None, actions: Vec::new() }, KEY_TOAST_MS);
     }
 
     fn caps_changed(&mut self, on: bool) {
@@ -1026,7 +1527,7 @@ impl Island {
         }
         let title = if on { "Caps Lock включён" } else { "Caps Lock выключен" };
         let badge = Badge::Text(if on { "A" } else { "a" }.into());
-        self.show_toast(Toast { badge, title: title.into(), text: String::new(), level: None }, KEY_TOAST_MS);
+        self.show_toast(Toast { badge, title: title.into(), text: String::new(), level: None, actions: Vec::new() }, KEY_TOAST_MS);
     }
 
     fn privacy_changed(&mut self) {
@@ -1037,13 +1538,16 @@ impl Island {
         self.dirty = true;
         self.last_frame = None;
         if let Some(app) = started_cam.first() {
-            self.show_toast(Toast { badge: Badge::Camera, title: "Камера включена".into(), text: app.clone(), level: None }, PRIVACY_TOAST_MS);
+            self.show_toast(Toast { badge: Badge::Camera, title: "Камера включена".into(), text: app.clone(), level: None, actions: Vec::new() }, PRIVACY_TOAST_MS);
         } else if let Some(app) = started_mic.first() {
-            self.show_toast(Toast { badge: Badge::Mic, title: "Микрофон включён".into(), text: app.clone(), level: None }, PRIVACY_TOAST_MS);
+            self.show_toast(Toast { badge: Badge::Mic, title: "Микрофон включён".into(), text: app.clone(), level: None, actions: Vec::new() }, PRIVACY_TOAST_MS);
         }
     }
 
     fn hide_toast(&mut self) {
+        if self.alarm.is_some() {
+            return; // Alarms stay until dismissed.
+        }
         if self.compact.toast.take().is_some() {
             self.retarget_collapsed();
             self.dirty = true;
@@ -1215,6 +1719,9 @@ impl Island {
             extra_icons: &self.extra_icons,
             privacy: (!self.in_use.camera.is_empty(), !self.in_use.microphone.is_empty()),
             window: self.window_view.as_ref(),
+            tab: self.tab,
+            notes: self.notes_view.as_ref(),
+            clip_page: &self.clip_page,
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -1280,7 +1787,63 @@ fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEACTIVATE => {
+            // Only text fields take the keyboard; everything else leaves the
+            // user's window active.
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField)));
+            return LRESULT(if field == Some(true) { MA_ACTIVATE } else { MA_NOACTIVATE } as isize);
+        }
+        WM_ACTIVATE => {
+            if wparam.0 & 0xFFFF == 0 {
+                // Lost activation (WA_INACTIVE): stop typing.
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
+                let outside = with_island(|i| {
+                    i.set_focus(Focus::None);
+                    !i.inside(pt.x, pt.y)
+                });
+                if outside == Some(true) {
+                    SetTimer(Some(hwnd), TIMER_COLLAPSE, COLLAPSE_DELAY_MS, None);
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_KEYDOWN => {
+            if with_island(|i| i.key_down(wparam.0 as u16)) == Some(true) {
+                return LRESULT(0);
+            }
+        }
+        WM_CHAR => {
+            with_island(|i| i.char_input(wparam.0 as u16));
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_NOTE_SAVE => {
+            let _ = KillTimer(Some(hwnd), TIMER_NOTE_SAVE);
+            with_island(|i| i.save_note());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_COUNTDOWN => {
+            with_island(|i| i.countdown_tick());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_TIMER_END => {
+            let _ = KillTimer(Some(hwnd), TIMER_TIMER_END);
+            with_island(|i| i.timer_ended());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_REMINDER => {
+            let _ = KillTimer(Some(hwnd), TIMER_REMINDER);
+            with_island(|i| i.reminders_due());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_ALARM_PULSE => {
+            with_island(|i| i.alarm_pulse());
+            return LRESULT(0);
+        }
         WM_MOUSEMOVE => {
             let _ = KillTimer(Some(hwnd), TIMER_COLLAPSE);
             if !TRACKING_LEAVE.with(|t| t.replace(true)) {
@@ -1358,6 +1921,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_pos(lparam);
+            // Alarm buttons work right in the collapsed pill.
+            if let Some(i) = with_island(|i| i.toast_action_at(x, y)).flatten() {
+                with_island(|is| is.alarm_action(i));
+                return LRESULT(0);
+            }
             // A click on the collapsed island opens it without waiting.
             if with_island(|i| {
                 let opening = !i.hovered;
@@ -1440,6 +2008,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam.0 == TIMER_COLLAPSE => {
             let _ = KillTimer(Some(hwnd), TIMER_COLLAPSE);
+            // set_hover keeps the island open while a field has the keyboard.
             with_island(|i| i.set_hover(false));
             return LRESULT(0);
         }
@@ -1566,6 +2135,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             clipboard::stop_listening(hwnd);
+            with_island(|i| i.save_note());
             with_island(|i| {
                 if let Some(mut s) = i.signals.take() {
                     s.stop();

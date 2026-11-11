@@ -188,6 +188,130 @@ pub enum Hit {
     WinPin,
     WinOpacity,
     WinMinimize,
+    Tab(Tab),
+    NoteField,
+    RemindField,
+    /// Timer preset `n` of TIMER_PRESETS.
+    TimerPreset(usize),
+    TimerToggle,
+    TimerReset,
+    /// Remove reminder row `n`.
+    RemindRemove(usize),
+}
+
+/// Views of the open island, shown as a row of tabs on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Home,
+    Clipboard,
+    Notes,
+}
+
+pub const TABS: [Tab; 3] = [Tab::Home, Tab::Clipboard, Tab::Notes];
+
+impl Tab {
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Home => "Главная",
+            Tab::Clipboard => "Буфер",
+            Tab::Notes => "Заметки",
+        }
+    }
+}
+
+/// Height of the tab row; tab content starts below it.
+pub const TAB_BAR_H: f32 = 44.0;
+/// Content height of the Clipboard and Notes tabs.
+pub const PAGE_H: f32 = 286.0;
+
+/// Tab buttons: the active one is wide enough for its label.
+pub fn tab_buttons(active: Tab) -> Vec<(Tab, Rect)> {
+    let mut x = PAD;
+    TABS.iter()
+        .map(|&t| {
+            let w = if t == active { 100.0 } else { 34.0 };
+            let r = Rect { x, y: 10.0, w, h: 28.0 };
+            x += w + 6.0;
+            (t, r)
+        })
+        .collect()
+}
+
+pub const TIMER_PRESETS: [u64; 4] = [60, 5 * 60, 10 * 60, 25 * 60];
+
+/// Parts of the Notes tab, for a panel `width` DIPs wide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotesRegions {
+    pub note_card: Rect,
+    pub note: Rect,
+    pub timer_card: Rect,
+    pub timer_text: Rect,
+    pub toggle: Rect,
+    pub reset: Rect,
+    pub presets: Vec<Rect>,
+    pub remind_card: Rect,
+    pub remind: Rect,
+    pub remind_hint: Rect,
+    pub rows: Vec<Rect>,
+    pub removes: Vec<Rect>,
+}
+
+pub fn notes_regions(width: f32) -> NotesRegions {
+    let top = TAB_BAR_H;
+    let inner = width - PAD * 2.0;
+    let left_w = (inner - GAP) * 0.52;
+    let note_card = Rect { x: PAD, y: top, w: left_w, h: PAGE_H - PAD };
+    let rx = PAD + left_w + GAP;
+    let rw = inner - left_w - GAP;
+    let timer_card = Rect { x: rx, y: top, w: rw, h: 116.0 };
+    let b = 30.0;
+    let reset = Rect { x: rx + rw - 12.0 - b, y: top + 34.0, w: b, h: b };
+    let toggle = Rect { x: reset.x - 8.0 - b, ..reset };
+    let pw = (rw - 24.0 - 3.0 * 6.0) / 4.0;
+    let presets = (0..4).map(|i| Rect { x: rx + 12.0 + i as f32 * (pw + 6.0), y: top + 78.0, w: pw, h: 26.0 }).collect();
+    let remind_card = Rect { x: rx, y: top + 116.0 + GAP, w: rw, h: PAGE_H - PAD - 116.0 - GAP };
+    let ry = remind_card.y;
+    let rows: Vec<Rect> = (0..3).map(|i| Rect { x: rx + 6.0, y: ry + 74.0 + i as f32 * 22.0, w: rw - 12.0, h: 22.0 }).collect();
+    let removes = rows.iter().map(|r| Rect { x: r.x + r.w - 24.0, y: r.y, w: 24.0, h: r.h }).collect();
+    NotesRegions {
+        note: Rect { x: PAD + 12.0, y: top + 32.0, w: left_w - 24.0, h: PAGE_H - PAD - 44.0 },
+        note_card,
+        timer_text: Rect { x: rx + 12.0, y: top + 28.0, w: rw - 24.0 - 2.0 * b - 16.0, h: 44.0 },
+        toggle,
+        reset,
+        presets,
+        timer_card,
+        remind: Rect { x: rx + 10.0, y: ry + 30.0, w: rw - 20.0, h: 26.0 },
+        remind_hint: Rect { x: rx + 12.0, y: ry + 57.0, w: rw - 24.0, h: 16.0 },
+        remind_card,
+        rows,
+        removes,
+    }
+}
+
+/// Rows of the Clipboard tab.
+pub fn clip_page_rows() -> Vec<Rect> {
+    (0..8).map(|i| Rect { x: PAD, y: TAB_BAR_H + i as f32 * 34.0, w: 0.0, h: 32.0 }).collect()
+}
+
+/// Buttons of a notice in the collapsed pill, relative to the pill's
+/// top-left; the last one is a round check mark.
+pub fn toast_actions(pill_w: f32, pill_h: f32, labels: &[String]) -> Vec<Rect> {
+    let mut x = pill_w - 6.0;
+    let mut out: Vec<Rect> = labels
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, label)| {
+            let w = if i == 0 { pill_h - 10.0 } else { 14.0 + label.chars().count() as f32 * 7.0 };
+            x -= w;
+            let r = Rect { x, y: 5.0, w, h: pill_h - 10.0 };
+            x -= 6.0;
+            r
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// Parts of the active-window tile.
@@ -334,6 +458,32 @@ mod tests {
         assert!(r.pin.x + r.pin.w <= r.opacity.x);
         assert!(r.opacity.x + r.opacity.w <= r.minimize.x);
         assert!(r.minimize.x + r.minimize.w <= tiles[0].x + tiles[0].w);
+    }
+
+    #[test]
+    fn tabs_and_pages_fit() {
+        let tabs = tab_buttons(Tab::Notes);
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[2].1.w, 100.0);
+        let r = notes_regions(560.0);
+        assert!(r.note_card.x + r.note_card.w < r.timer_card.x);
+        assert!(r.timer_card.y + r.timer_card.h <= r.remind_card.y);
+        for row in r.rows.iter().chain(r.presets.iter()) {
+            assert!(row.x + row.w <= 560.0 - PAD + 0.01);
+        }
+        let last = r.rows.last().unwrap();
+        assert!(last.y + last.h <= r.remind_card.y + r.remind_card.h + 0.01);
+        assert!(r.remind_card.y + r.remind_card.h <= TAB_BAR_H + PAGE_H);
+        let rows = clip_page_rows();
+        assert!(rows.last().unwrap().y + 32.0 <= TAB_BAR_H + PAGE_H);
+    }
+
+    #[test]
+    fn toast_buttons_from_the_right() {
+        let b = toast_actions(320.0, 36.0, &["Ещё раз".into(), "✓".into()]);
+        assert_eq!(b.len(), 2);
+        assert!(b[0].x + b[0].w < b[1].x);
+        assert!((b[1].x + b[1].w - 314.0).abs() < 0.01);
     }
 
     #[test]
