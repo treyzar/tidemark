@@ -45,8 +45,15 @@ fn main() {
     let wait = Duration::from_secs(wait);
     if raw {
         let mut msg = event.clone();
-        msg["title"] = short(event["title"].as_str().unwrap_or_default(), 80).into();
-        msg["text"] = short(event["text"].as_str().unwrap_or_default(), 160).into();
+        let (title, text) = (event["title"].as_str().unwrap_or_default(), event["text"].as_str().unwrap_or_default());
+        msg["title"] = short(title, 80).into();
+        msg["text"] = short(text, TEXT_MAX).into();
+        // Same rule as for Claude: no ✓ unless the card shows it all.
+        if !(fits(title) && fits(text)) {
+            if let Some(options) = msg["options"].as_array_mut() {
+                options.retain(|o| o != "✓");
+            }
+        }
         let choice = if msg["kind"] == "ask" { ask(&msg, wait) } else { notify(&msg); None };
         println!("{}", json!({ "choice": choice }));
         return;
@@ -136,8 +143,18 @@ fn describe_tool(tool: &str, input: &Value, cwd: &str) -> (String, String, bool)
 }
 
 /// Fits the card's second line in full: one line, not cut.
+/// One visible line, not cut, with nothing that draws differently from
+/// what it is (control, bidi, zero-width, line/paragraph separators).
 fn fits(text: &str) -> bool {
-    !text.contains(['\n', '\r']) && text.trim().chars().count() <= TEXT_MAX
+    !text.chars().any(hidden_char) && text.chars().count() <= TEXT_MAX
+}
+
+fn hidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c as u32,
+            0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+            | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+            | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFB | 0xE0000..=0xE0FFF)
 }
 
 fn card(kind: &str, title: &str, text: &str, options: &[String]) -> Value {
@@ -157,7 +174,7 @@ fn plan(event: &Value) -> Option<Plan> {
             let text = with_project(&detail);
             // ✓ only when the card shows everything it would allow; a
             // multi-line or cut command can be refused or left to the terminal.
-            let options: &[&str] = if complete && fits(&text) { &PERMISSION_OPTIONS } else { &PERMISSION_OPTIONS_PARTIAL };
+            let options: &[&str] = if complete && fits(&text) && fits(&title) { &PERMISSION_OPTIONS } else { &PERMISSION_OPTIONS_PARTIAL };
             let options: Vec<String> = options.iter().map(|s| s.to_string()).collect();
             Some(Plan::Permission(card("ask", &title, &text, &options)))
         }
@@ -310,6 +327,17 @@ mod tests {
         assert_eq!(permission_answer(Some("Нет")).unwrap()["hookSpecificOutput"]["decision"]["behavior"], "deny");
         assert!(permission_answer(Some("Терминал")).is_none());
         assert!(permission_answer(None).is_none());
+    }
+
+    #[test]
+    fn hidden_characters_do_not_fit() {
+        assert!(fits("cargo build --release"));
+        assert!(fits("ls «проект»"));
+        assert!(!fits("echo ok\u{2028}rm -rf ~"));
+        assert!(!fits("echo \u{202E}txt.exe"));
+        assert!(!fits("rm\u{200B} -rf"));
+        assert!(!fits("a\tb"));
+        assert!(!fits(&"x".repeat(TEXT_MAX + 1)));
     }
 
     /// Nothing can be allowed from the island that the card does not show.
