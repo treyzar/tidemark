@@ -6,6 +6,7 @@
 //! bounds keeps clicks outside the island going to the windows underneath.
 
 use crate::active_app::{self, ActiveApp};
+use crate::agent;
 use crate::anim::Spring;
 use crate::privacy::{self, InUse, WM_PRIVACY};
 use crate::signals::{self, Signals, WM_VOLUME};
@@ -239,7 +240,21 @@ pub struct Island {
     ctl_pw: TextField,
     power_confirm: Option<usize>,
     ctl_view: Option<ControlView>,
+    agent_inbox: Option<agent::Inbox>,
+    /// Agent cards waiting for an answer, oldest first; the first one is
+    /// shown while no other alarm is up.
+    agent_cards: Vec<AgentCard>,
 }
+
+struct AgentCard {
+    id: u64,
+    msg: agent::Message,
+    reply: std::sync::mpsc::Sender<Option<usize>>,
+}
+
+/// Coding agents' notices and cards.
+const WM_AGENT: u32 = WM_APP + 18;
+const AGENT_TOAST_MS: u32 = 6000;
 
 #[derive(Debug, Clone)]
 enum SearchHit {
@@ -264,6 +279,8 @@ enum Focus {
 enum Alarm {
     Timer,
     Reminder(String),
+    /// A coding agent's card (`agent_cards` id).
+    Agent(u64),
 }
 
 thread_local! {
@@ -405,6 +422,8 @@ pub fn create(cfg: Config) -> Result<HWND> {
             ctl_pw: TextField::new(false),
             power_confirm: None,
             ctl_view: None,
+            agent_inbox: None,
+            agent_cards: Vec::new(),
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -416,6 +435,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
         island.refresh_shelf_rows();
         island.shelf_target = shelf::Target::register(hwnd);
         island.signals = Some(Signals::start(hwnd));
+        island.agent_inbox = Some(agent::start(hwnd.0 as isize, WM_AGENT));
         if island.cfg.privacy_indicator {
             island.privacy = privacy::Watcher::start(hwnd);
             island.in_use = island.privacy.as_ref().map(|p| p.get()).unwrap_or_default();
@@ -702,6 +722,13 @@ impl Island {
     }
 
     fn collapsed_width(&self) -> f32 {
+        if let Some(t) = self.compact.toast.as_ref().filter(|t| !t.actions.is_empty()) {
+            // Room for the badge, some text and every button.
+            let h = self.cfg.collapsed_height;
+            let buttons = layout::toast_actions(1000.0, h, &t.actions);
+            let used = 1000.0 - buttons.first().map_or(1000.0, |b| b.x);
+            return (h + 4.0 + 170.0 + used).clamp(self.cfg.collapsed_media_width, 600.0);
+        }
         if self.compact.media.is_some() || self.compact.toast.is_some() {
             self.cfg.collapsed_media_width
         } else {
@@ -2007,6 +2034,10 @@ impl Island {
                 level: None,
                 actions: vec!["+10 мин".into(), "✓".into()],
             },
+            Alarm::Agent(id) => {
+                let Some(card) = self.agent_cards.iter().find(|c| c.id == *id) else { return };
+                Toast { badge: Badge::Text("AI".into()), title: card.msg.title.clone(), text: card.msg.text.clone(), level: None, actions: card.msg.options.clone() }
+            }
         };
         self.alarm = Some(alarm);
         if self.fullscreen {
@@ -2059,6 +2090,15 @@ impl Island {
     /// Button `i` of the alarm in the pill.
     fn alarm_action(&mut self, i: usize) {
         let Some(alarm) = self.alarm.clone() else { return };
+        if let Alarm::Agent(id) = alarm {
+            self.dismiss_alarm();
+            if let Some(pos) = self.agent_cards.iter().position(|c| c.id == id) {
+                let card = self.agent_cards.remove(pos);
+                let _ = card.reply.send(Some(i));
+            }
+            self.next_agent_card();
+            return;
+        }
         let last = self.compact.toast.as_ref().map_or(0, |t| t.actions.len().saturating_sub(1));
         self.dismiss_alarm();
         if i == last {
@@ -2066,6 +2106,7 @@ impl Island {
                 self.timer.reset();
                 self.timer_changed();
             }
+            self.next_agent_card();
             return;
         }
         match alarm {
@@ -2078,6 +2119,41 @@ impl Island {
                 self.store.save();
                 self.arm_reminders();
                 self.refresh_notes_view();
+            }
+            Alarm::Agent(_) => {}
+        }
+        self.next_agent_card();
+    }
+
+    /// Notices and cards from coding agents (island-hook.exe).
+    fn agent_arrived(&mut self) {
+        let Some(inbox) = self.agent_inbox.clone() else { return };
+        for event in inbox.take() {
+            match event {
+                agent::Event::Notice(msg) => {
+                    let toast = Toast { badge: Badge::Text("AI".into()), title: msg.title, text: msg.text, level: None, actions: Vec::new() };
+                    self.show_toast(toast, AGENT_TOAST_MS);
+                }
+                agent::Event::Ask { id, msg, reply } => {
+                    self.agent_cards.push(AgentCard { id, msg, reply });
+                    self.next_agent_card();
+                }
+                agent::Event::Gone(id) => {
+                    self.agent_cards.retain(|c| c.id != id);
+                    if self.alarm == Some(Alarm::Agent(id)) {
+                        self.dismiss_alarm();
+                        self.next_agent_card();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shows the oldest waiting agent card unless another alarm is up.
+    fn next_agent_card(&mut self) {
+        if self.alarm.is_none() {
+            if let Some(id) = self.agent_cards.first().map(|c| c.id) {
+                self.raise_alarm(Alarm::Agent(id));
             }
         }
     }
@@ -2718,6 +2794,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 if i.hovered {
                     i.hover_at(x, y);
+                } else if i.alarm.is_some() {
+                    // Buttons in the pill: a click opens the panel instead.
                 } else if i.cfg.hover_delay_ms == 0 {
                     i.set_hover(true);
                     i.hover_at(x, y);
@@ -2966,6 +3044,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CONTROL => {
             with_island(|i| i.control_arrived());
+            return LRESULT(0);
+        }
+        WM_AGENT => {
+            with_island(|i| i.agent_arrived());
             return LRESULT(0);
         }
         WM_TIMER if wparam.0 == TIMER_CONFIRM => {

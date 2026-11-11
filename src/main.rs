@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod active_app;
+mod agent;
 mod anim;
 mod audio;
 mod autostart;

@@ -800,11 +800,11 @@ impl Renderer {
                 let text_l = badge.right + 9.0 * k;
                 let buttons = layout::toast_actions(w / k, h / k, &t.actions);
                 let text_r = buttons.first().map_or(w - pad, |b| b.x * k - 8.0 * k);
-                for (i, (b, label)) in buttons.iter().zip(&t.actions).enumerate() {
+                for (b, label) in buttons.iter().zip(&t.actions) {
                     let r = D2D_RECT_F { left: b.x * k, top: b.y * k, right: (b.x + b.w) * k, bottom: (b.y + b.h) * k };
-                    let last = i + 1 == t.actions.len();
-                    self.fill_rect(if last { th.accent } else { th.tile_hover }, r, (r.bottom - r.top) / 2.0);
-                    if last {
+                    let check = label == "✓";
+                    self.fill_rect(if check { th.accent } else { th.tile_hover }, r, (r.bottom - r.top) / 2.0);
+                    if check {
                         // Check mark.
                         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
                         self.line([1.0; 4], cx - 5.0 * k, cy, cx - 1.5 * k, cy + 3.5 * k, 2.0 * k);

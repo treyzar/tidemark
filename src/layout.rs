@@ -422,15 +422,15 @@ pub fn clip_page_rows() -> Vec<Rect> {
 }
 
 /// Buttons of a notice in the collapsed pill, relative to the pill's
-/// top-left; the last one is a round check mark.
+/// top-left; one-character ones ("✓", "✕") are round.
 pub fn toast_actions(pill_w: f32, pill_h: f32, labels: &[String]) -> Vec<Rect> {
     let mut x = pill_w - 6.0;
     let mut out: Vec<Rect> = labels
         .iter()
         .rev()
-        .enumerate()
-        .map(|(i, label)| {
-            let w = if i == 0 { pill_h - 10.0 } else { 14.0 + label.chars().count() as f32 * 7.0 };
+        .map(|label| {
+            // One-character buttons ("✓", "✕") are round.
+            let w = if label.chars().count() == 1 { pill_h - 10.0 } else { 14.0 + label.chars().count() as f32 * 7.0 };
             x -= w;
             let r = Rect { x, y: 5.0, w, h: pill_h - 10.0 };
             x -= 6.0;
