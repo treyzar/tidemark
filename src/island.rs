@@ -7,6 +7,7 @@
 
 use crate::active_app::{self, ActiveApp};
 use crate::agent;
+use crate::record;
 use crate::anim::Spring;
 use crate::privacy::{self, InUse, WM_PRIVACY};
 use crate::signals::{self, Signals, WM_VOLUME};
@@ -249,6 +250,7 @@ pub struct Island {
     agent_cards: Vec<AgentCard>,
     /// Drawn width of the shown agent card's longer line, DIPs.
     agent_text_w: f32,
+    recording: Option<record::Recording>,
 }
 
 struct AgentCard {
@@ -261,6 +263,8 @@ struct AgentCard {
 const WM_AGENT: u32 = WM_APP + 18;
 const AGENT_TOAST_MS: u32 = 6000;
 const AGENT_CLICK_GUARD: Duration = Duration::from_millis(700);
+/// Ticks the recording card once a second.
+const TIMER_REC: usize = 18;
 
 #[derive(Debug, Clone)]
 enum SearchHit {
@@ -287,6 +291,8 @@ enum Alarm {
     Reminder(String),
     /// A coding agent's card (`agent_cards` id).
     Agent(u64),
+    /// "Идёт запись 0:12" with Стоп while the screen is recorded.
+    Recording,
 }
 
 thread_local! {
@@ -432,6 +438,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             agent_inbox: None,
             agent_cards: Vec::new(),
             agent_text_w: 0.0,
+            recording: None,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -1616,6 +1623,7 @@ impl Island {
             3 => self.start_overlay(overlay::Mode::Qr),
             4 => self.start_overlay(overlay::Mode::Picker),
             5 => self.plain_text(),
+            layout::TOOL_RECORD => self.toggle_recording(),
             _ => self.open_search(),
         }
     }
@@ -2056,6 +2064,10 @@ impl Island {
                 level: None,
                 actions: vec!["+10 мин".into(), "✓".into()],
             },
+            Alarm::Recording => {
+                let Some(rec) = &self.recording else { return };
+                Toast { badge: Badge::Record, title: "Идёт запись".into(), text: record::elapsed_label(rec.started.elapsed()), level: None, actions: vec!["Стоп".into()] }
+            }
             Alarm::Agent(id) => {
                 let Some(card) = self.agent_cards.iter().find(|c| c.id == *id) else { return };
                 let (title, text) = (card.msg.title.clone(), card.msg.text.clone());
@@ -2073,6 +2085,7 @@ impl Island {
                 Toast { badge: Badge::Text("AI".into()), title, text, level: None, actions }
             }
         };
+        let quiet = alarm == Alarm::Recording;
         self.alarm = Some(alarm);
         self.alarm_since = Instant::now();
         if self.fullscreen {
@@ -2080,12 +2093,15 @@ impl Island {
         }
         self.compact.toast = Some(toast);
         self.retarget_collapsed();
-        self.wobble.velocity += 120.0;
+        self.wobble.velocity += if quiet { 40.0 } else { 120.0 };
         self.dirty = true;
         self.last_frame = None;
         self.alarm_pulses = 0;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TOAST);
+            if quiet {
+                return; // A recording just sits there, no beeps.
+            }
             SetTimer(Some(self.hwnd), TIMER_ALARM_PULSE, ALARM_PULSE_MS, None);
             let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK);
         }
@@ -2125,6 +2141,10 @@ impl Island {
     /// Button `i` of the alarm in the pill.
     fn alarm_action(&mut self, i: usize) {
         let Some(alarm) = self.alarm.clone() else { return };
+        if alarm == Alarm::Recording {
+            self.stop_recording();
+            return;
+        }
         if let Alarm::Agent(id) = alarm {
             if self.alarm_since.elapsed() < AGENT_CLICK_GUARD {
                 return; // The card just changed under the cursor.
@@ -2158,7 +2178,7 @@ impl Island {
                 self.arm_reminders();
                 self.refresh_notes_view();
             }
-            Alarm::Agent(_) => {}
+            Alarm::Agent(_) | Alarm::Recording => {}
         }
         self.next_agent_card();
     }
@@ -2187,13 +2207,90 @@ impl Island {
         }
     }
 
-    /// Shows the oldest waiting agent card unless another alarm is up.
+    /// Shows the oldest waiting agent card unless another alarm is up (a
+    /// recording card steps aside and comes back after).
     fn next_agent_card(&mut self) {
-        if self.alarm.is_none() {
+        if self.alarm.is_none() || self.alarm == Some(Alarm::Recording) {
             if let Some(id) = self.agent_cards.first().map(|c| c.id) {
                 self.raise_alarm(Alarm::Agent(id));
+                return;
             }
         }
+        if self.alarm.is_none() && self.recording.is_some() {
+            self.raise_alarm(Alarm::Recording);
+        }
+    }
+
+    fn toggle_recording(&mut self) {
+        if self.recording.is_some() {
+            self.stop_recording();
+        } else {
+            self.start_recording();
+        }
+    }
+
+    fn start_recording(&mut self) {
+        let Some(rec) = record::Recording::start(self.hwnd, record::new_path()) else { return };
+        self.recording = Some(rec);
+        unsafe {
+            // Keep the island itself out of the video.
+            let _ = SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE);
+            SetTimer(Some(self.hwnd), TIMER_REC, 1000, None);
+        }
+        self.set_focus(Focus::None);
+        self.set_hover(false);
+        self.dirty = true;
+        self.next_agent_card();
+    }
+
+    fn stop_recording(&mut self) {
+        if let Some(rec) = &self.recording {
+            rec.stop(); // WM_RECORDED follows once the file is finished.
+        }
+        if self.alarm == Some(Alarm::Recording) {
+            self.dismiss_alarm();
+        }
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REC);
+        }
+    }
+
+    fn recording_tick(&mut self) {
+        if let (Some(rec), Some(Alarm::Recording)) = (&self.recording, &self.alarm) {
+            let label = record::elapsed_label(rec.started.elapsed());
+            if let Some(t) = self.compact.toast.as_mut() {
+                if t.text != label {
+                    t.text = label;
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// The recording thread finished the file (or failed).
+    fn recording_done(&mut self) {
+        self.recording = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REC);
+            let _ = SetWindowDisplayAffinity(self.hwnd, WDA_NONE);
+        }
+        if self.alarm == Some(Alarm::Recording) {
+            self.dismiss_alarm();
+        }
+        self.dirty = true;
+        match record::take_result() {
+            Some(path) => {
+                let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
+                // On the shelf, ready to drag into a chat or a mail.
+                self.shelf.retain(|p| *p != path);
+                self.shelf.insert(0, path);
+                shelf::save(&self.shelf);
+                self.refresh_shelf_rows();
+                self.show_toast(Toast { badge: Badge::Record, title: "Запись сохранена · на полке".into(), text: name, level: None, actions: Vec::new() }, AGENT_TOAST_MS);
+            }
+            None => self.show_toast(Toast { badge: Badge::Record, title: "Не удалось записать экран".into(), text: String::new(), level: None, actions: Vec::new() }, AGENT_TOAST_MS),
+        }
+        self.next_agent_card();
     }
 
     /// Alarm button under (x, y) client pixels while collapsed.
@@ -2674,6 +2771,7 @@ impl Island {
             shelf: &self.shelf_rows,
             text: self.text_view.as_ref(),
             control: self.ctl_view.as_ref(),
+            recording: self.recording.is_some(),
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -3086,6 +3184,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_AGENT => {
             with_island(|i| i.agent_arrived());
+            return LRESULT(0);
+        }
+        record::WM_RECORDED => {
+            with_island(|i| i.recording_done());
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TIMER_REC => {
+            with_island(|i| i.recording_tick());
             return LRESULT(0);
         }
         WM_TIMER if wparam.0 == TIMER_CONFIRM => {

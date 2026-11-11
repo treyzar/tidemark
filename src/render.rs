@@ -85,6 +85,8 @@ pub struct Scene<'a> {
     pub shelf: &'a [ClipRow],
     pub text: Option<&'a TextView>,
     pub control: Option<&'a ControlView>,
+    /// A screen recording runs (the Tools button turns into Стоп).
+    pub recording: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,6 +201,8 @@ pub enum Badge {
     Mic,
     Timer,
     Bell,
+    /// Screen recording: a red dot.
+    Record,
     /// A color swatch (eyedropper).
     Color([u8; 3]),
 }
@@ -300,6 +304,7 @@ struct HomeKey {
     hovered: Option<usize>,
     tiles: Vec<Placed>,
     panel: (f32, f32),
+    recording: bool,
 }
 
 struct HomeLayer {
@@ -1196,6 +1201,7 @@ impl Renderer {
         let chip = match badge {
             Badge::Camera => [0.204, 0.78, 0.349, 1.0],
             Badge::Mic => [1.0, 0.624, 0.039, 1.0],
+            Badge::Record => [1.0, 0.231, 0.188, 1.0],
             _ => th.tile_hover,
         };
         self.fill_rect(chip, r, side / 2.0);
@@ -1246,6 +1252,7 @@ impl Renderer {
                 let fill = [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0];
                 self.fill_circle(fill, cx, cy, side / 2.0 - 4.0 * k);
             }
+            Badge::Record => self.fill_circle([1.0; 4], cx, cy, 4.0 * k),
             Badge::Mic => {
                 self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy + 2.0 * k }, 2.5 * k);
                 self.line(ink, cx - 5.0 * k, cy - 1.0 * k, cx - 5.0 * k + 0.01, cy + 1.5 * k, 1.3 * k);
@@ -1445,6 +1452,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            recording: scene.recording,
             control: if scene.tab == Tab::Control { scene.control.cloned() } else { None },
             text: if scene.tab == Tab::Text { scene.text.cloned() } else { None },
             shelf: if scene.tab == Tab::Shelf { scene.shelf.to_vec() } else { Vec::new() },
@@ -1831,6 +1839,20 @@ impl Renderer {
                     self.line(ink, cx, cy - 5.0 * k, cx, cy + 6.0 * k, 1.6 * k);
                     self.line(ink, cx - 7.0 * k, cy + 6.0 * k, cx + 7.0 * k, cy - 7.0 * k, 1.3 * k);
                 }
+                layout::TOOL_RECORD => {
+                    // Record: a red dot in a ring; a red square while recording.
+                    let red = [1.0, 0.231, 0.188, 1.0];
+                    if scene.recording {
+                        self.fill_rect(red, D2D_RECT_F { left: cx - 5.0 * k, top: cy - 5.0 * k, right: cx + 5.0 * k, bottom: cy + 5.0 * k }, 1.5 * k);
+                    } else {
+                        unsafe {
+                            self.brush.SetColor(&color(ink, 1.0));
+                            let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 7.0 * k, radiusY: 7.0 * k };
+                            self.dc.DrawEllipse(&e, &self.brush, 1.5 * k, None);
+                        }
+                        self.fill_circle(red, cx, cy, 4.0 * k);
+                    }
+                }
                 _ => {
                     unsafe {
                         self.brush.SetColor(&color(ink, 1.0));
@@ -1843,7 +1865,8 @@ impl Renderer {
             unsafe {
                 self.brush.SetColor(&color(th.subtext, 1.0));
                 let label = D2D_RECT_F { left: r.left, top: r.top + 30.0 * k, right: r.right, bottom: r.bottom - 2.0 * k };
-                let s: Vec<u16> = layout::TOOLS[i].encode_utf16().collect();
+                let name = if i == layout::TOOL_RECORD && scene.recording { "Стоп" } else { layout::TOOLS[i] };
+                let s: Vec<u16> = name.encode_utf16().collect();
                 self.dc.DrawText(&s, &fonts.small_center, &label, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             }
         }

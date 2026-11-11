@@ -331,7 +331,9 @@ pub fn search_rows(width: f32) -> Vec<Rect> {
     (0..SEARCH_ROWS).map(|i| Rect { x: PAD, y: 62.0 + i as f32 * 38.0, w: width - 2.0 * PAD, h: 36.0 }).collect()
 }
 
-pub const TOOLS: [&str; 7] = ["Область", "Весь экран", "Текст", "QR-код", "Пипетка", "Без формата", "Команда"];
+pub const TOOLS: [&str; 8] = ["Область", "Весь экран", "Текст", "QR-код", "Пипетка", "Без формата", "Команда", "Запись"];
+/// Index of the screen recording button in TOOLS.
+pub const TOOL_RECORD: usize = 7;
 
 /// Buttons of the Tools tile, left to right.
 pub fn tool_buttons(tile: &Placed) -> Vec<Rect> {
@@ -608,8 +610,10 @@ mod tests {
     fn tools_and_text_page_fit() {
         let (tiles, _) = pack(&[Tools], 560.0);
         let b = tool_buttons(&tiles[0]);
-        assert_eq!(b.len(), 7);
-        assert!(b[6].x + b[6].w <= tiles[0].x + tiles[0].w + 0.01);
+        assert_eq!(b.len(), TOOLS.len());
+        assert!(b[TOOLS.len() - 1].x + b[TOOLS.len() - 1].w <= tiles[0].x + tiles[0].w + 0.01);
+        // Room for labels like «Без формата».
+        assert!(b.iter().all(|r| r.w >= 56.0), "{:?}", b[0].w);
         let r = text_regions(560.0);
         assert!(r.card.x + r.card.w < r.ops[0].x);
         assert!(r.translate.y + r.translate.h <= TAB_BAR_H + PAGE_H);

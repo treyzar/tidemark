@@ -24,6 +24,7 @@ mod notes;
 mod overlay;
 mod privacy;
 mod recognize;
+mod record;
 mod render;
 mod shelf;
 mod signals;
