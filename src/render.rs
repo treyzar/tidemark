@@ -542,6 +542,22 @@ impl Renderer {
         Ok(())
     }
 
+    /// Drawn widths (DIPs) of a notice's title and text lines in the
+    /// collapsed pill; None before the first frame made the fonts.
+    pub fn pill_text_widths(&self, title: &str, text: &str) -> Option<(f32, f32)> {
+        let fonts = self.fonts.as_ref()?;
+        let width = |s: &str, fmt: &IDWriteTextFormat| -> Option<f32> {
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            unsafe {
+                let layout = self.dwrite.CreateTextLayout(&wide, fmt, 100_000.0, 1000.0).ok()?;
+                let mut m = DWRITE_TEXT_METRICS::default();
+                layout.GetMetrics(&mut m).ok()?;
+                (m.lineCount == 1).then_some(m.widthIncludingTrailingWhitespace / fonts.scale)
+            }
+        };
+        Some((width(title, &fonts.pill_title)?, width(text, &fonts.pill_artist)?))
+    }
+
     fn ensure_fonts(&mut self, scale: f32) -> Result<()> {
         if self.fonts.as_ref().is_some_and(|f| f.scale == scale) {
             return Ok(());

@@ -11,9 +11,11 @@ const HOOK =
   process.env.WIN_ISLAND_HOOK ??
   join(homedir(), "Documents", "win-island", "target", "release", "island-hook.exe")
 
-// Control, format (bidi, zero-width) and line/paragraph separators: text
-// that would draw differently from what it is. island-hook checks it too.
-const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+// Characters a card may show next to ✓ (same allowlist as island-hook,
+// which checks it again): printable ASCII, Latin-1, the Russian alphabet,
+// common punctuation. Everything else leaves only Терминал / Нет.
+const SHOWN_WHOLE = /^[\x20-\x7E¡-¬®-ÿЁА-яё‐-‧‰-⁞€№]*$/u
+const fitsIn = (s, max) => SHOWN_WHOLE.test(s) && s === s.trim() && [...s].length <= max
 
 /** Sends one message to the island; resolves to the pressed button or null. */
 function island(msg, waitSeconds = 50) {
@@ -47,10 +49,11 @@ export const WinIsland = async ({ directory }) => {
       const text = where(pattern)
       // ✓ only when the card shows all of it; "Терминал" leaves the
       // question to opencode's own prompt.
-      const complete = pattern !== "" && !HIDDEN.test(text) && [...text].length <= 160
+      const title = input.title || "Разрешить?"
+      const complete = pattern !== "" && fitsIn(text, 160) && fitsIn(title, 80)
       const choice = await island({
         kind: "ask",
-        title: input.title || "Разрешить?",
+        title,
         text,
         options: complete ? ["Терминал", "Нет", "✓"] : ["Терминал", "Нет"],
       })

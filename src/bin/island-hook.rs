@@ -46,10 +46,10 @@ fn main() {
     if raw {
         let mut msg = event.clone();
         let (title, text) = (event["title"].as_str().unwrap_or_default(), event["text"].as_str().unwrap_or_default());
-        msg["title"] = short(title, 80).into();
+        msg["title"] = short(title, TITLE_MAX).into();
         msg["text"] = short(text, TEXT_MAX).into();
         // Same rule as for Claude: no ✓ unless the card shows it all.
-        if !(fits(title) && fits(text)) {
+        if !(fits_in(title, TITLE_MAX) && fits(text)) {
             if let Some(options) = msg["options"].as_array_mut() {
                 options.retain(|o| o != "✓");
             }
@@ -91,6 +91,7 @@ const PERMISSION_OPTIONS: [&str; 3] = ["Терминал", "Нет", "✓"];
 const PERMISSION_OPTIONS_PARTIAL: [&str; 2] = ["Терминал", "Нет"];
 /// The card's second line holds this many characters.
 const TEXT_MAX: usize = 160;
+const TITLE_MAX: usize = 80;
 
 fn project(event: &Value) -> String {
     let cwd = event["cwd"].as_str().unwrap_or_default().trim_end_matches(['\\', '/']);
@@ -109,11 +110,20 @@ fn short(s: &str, max: usize) -> String {
 }
 
 /// A path relative to the project, or the full path outside it.
+/// Paths with `..` or `.` parts are always shown in full.
 fn shown_path(p: &str, cwd: &str) -> String {
-    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    let (np, nc) = (norm(p), norm(cwd));
-    if !nc.is_empty() && np.starts_with(&format!("{nc}/")) {
-        p[nc.len() + 1..].to_string()
+    let path = p.replace('\\', "/");
+    let base = cwd.replace('\\', "/");
+    let base = base.trim_end_matches('/');
+    let plain = !path.split('/').any(|part| part == ".." || part == ".");
+    let inside = plain
+        && !base.is_empty()
+        && path.len() > base.len() + 1
+        && path.is_char_boundary(base.len())
+        && path[..base.len()].eq_ignore_ascii_case(base)
+        && path[base.len()..].starts_with('/');
+    if inside {
+        path[base.len() + 1..].to_string()
     } else {
         p.to_string()
     }
@@ -143,22 +153,25 @@ fn describe_tool(tool: &str, input: &Value, cwd: &str) -> (String, String, bool)
 }
 
 /// Fits the card's second line in full: one line, not cut.
-/// One visible line, not cut, with nothing that draws differently from
-/// what it is (control, bidi, zero-width, line/paragraph separators).
-fn fits(text: &str) -> bool {
-    !text.chars().any(hidden_char) && text.chars().count() <= TEXT_MAX
+/// Shown whole: `short(text, max)` leaves it as is, and every character is
+/// one that draws as what it is.
+fn fits_in(text: &str, max: usize) -> bool {
+    short(text, max) == text && text.chars().all(allowed_char)
 }
 
-fn hidden_char(c: char) -> bool {
-    c.is_control()
-        || matches!(c as u32,
-            0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
-            | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
-            | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFB | 0xE0000..=0xE0FFF)
+fn fits(text: &str) -> bool {
+    fits_in(text, TEXT_MAX)
+}
+
+/// Characters a card may show next to ✓: printable ASCII, Latin-1,
+/// the Russian alphabet and common punctuation. An allowlist, so invisible,
+/// bidi, combining and look-alike characters from elsewhere never pass.
+fn allowed_char(c: char) -> bool {
+    matches!(c as u32, 0x20..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF | 0x401 | 0x410..=0x44F | 0x451 | 0x2010..=0x2027 | 0x2030..=0x205E | 0x20AC | 0x2116)
 }
 
 fn card(kind: &str, title: &str, text: &str, options: &[String]) -> Value {
-    json!({ "kind": kind, "source": "Claude", "title": short(title, 80), "text": short(text, TEXT_MAX), "options": options })
+    json!({ "kind": kind, "source": "Claude", "title": short(title, TITLE_MAX), "text": short(text, TEXT_MAX), "options": options })
 }
 
 fn plan(event: &Value) -> Option<Plan> {
@@ -174,7 +187,7 @@ fn plan(event: &Value) -> Option<Plan> {
             let text = with_project(&detail);
             // ✓ only when the card shows everything it would allow; a
             // multi-line or cut command can be refused or left to the terminal.
-            let options: &[&str] = if complete && fits(&text) && fits(&title) { &PERMISSION_OPTIONS } else { &PERMISSION_OPTIONS_PARTIAL };
+            let options: &[&str] = if complete && fits(&text) && fits_in(&title, TITLE_MAX) { &PERMISSION_OPTIONS } else { &PERMISSION_OPTIONS_PARTIAL };
             let options: Vec<String> = options.iter().map(|s| s.to_string()).collect();
             Some(Plan::Permission(card("ask", &title, &text, &options)))
         }
@@ -330,6 +343,16 @@ mod tests {
     }
 
     #[test]
+    fn paths() {
+        assert_eq!(shown_path("C:\\P\\Demo\\src\\a.rs", "c:/p/demo"), "src/a.rs");
+        assert_eq!(shown_path("C:/p/demo/../secret.txt", "C:/p/demo"), "C:/p/demo/../secret.txt");
+        assert_eq!(shown_path("C:/p/demox/a.rs", "C:/p/demo"), "C:/p/demox/a.rs");
+        // Non-ASCII case differences are not folded (and never mis-slice).
+        assert_eq!(shown_path("C:/Проект/a.rs", "C:/проект"), "C:/Проект/a.rs");
+        assert_eq!(shown_path("C:/проект/a.rs", "C:/проект"), "a.rs");
+    }
+
+    #[test]
     fn hidden_characters_do_not_fit() {
         assert!(fits("cargo build --release"));
         assert!(fits("ls «проект»"));
@@ -337,6 +360,10 @@ mod tests {
         assert!(!fits("echo \u{202E}txt.exe"));
         assert!(!fits("rm\u{200B} -rf"));
         assert!(!fits("a\tb"));
+        assert!(!fits(" padded "));
+        assert!(!fits("e\u{301}cho")); // combining mark
+        assert!(!fits("ѕudo")); // Cyrillic dze: not in the Russian alphabet
+        assert!(fits("Ёлка и ёж"));
         assert!(!fits(&"x".repeat(TEXT_MAX + 1)));
     }
 

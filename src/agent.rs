@@ -34,6 +34,12 @@ pub fn pipe_name() -> String {
     format!(r"\\.\pipe\win-island-agent-{user}")
 }
 
+/// Any character outside the card allowlist (same as island-hook's):
+/// printable ASCII, Latin-1, the Russian alphabet, common punctuation.
+pub fn has_hidden(text: &str) -> bool {
+    !text.chars().all(|c| matches!(c as u32, 0x20..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF | 0x401 | 0x410..=0x44F | 0x451 | 0x2010..=0x2027 | 0x2030..=0x205E | 0x20AC | 0x2116))
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Message {
     pub kind: String,
@@ -194,6 +200,14 @@ mod tests {
         assert_eq!(m.options.len(), 3);
         let n: Message = serde_json::from_str(r#"{"kind":"notice","title":"Готово"}"#).unwrap();
         assert!(n.options.is_empty() && n.text.is_empty());
+    }
+
+    #[test]
+    fn hidden_characters() {
+        assert!(!has_hidden("cargo build --release «ok»"));
+        assert!(has_hidden("a\u{202E}b"));
+        assert!(has_hidden("a\u{2028}b"));
+        assert!(has_hidden("a\nb"));
     }
 
     #[test]

@@ -247,6 +247,8 @@ pub struct Island {
     /// Agent cards waiting for an answer, oldest first; the first one is
     /// shown while no other alarm is up.
     agent_cards: Vec<AgentCard>,
+    /// Drawn width of the shown agent card's longer line, DIPs.
+    agent_text_w: f32,
 }
 
 struct AgentCard {
@@ -429,6 +431,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             ctl_view: None,
             agent_inbox: None,
             agent_cards: Vec::new(),
+            agent_text_w: 0.0,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -726,13 +729,27 @@ impl Island {
         ((self.height.value - HANDLE_H) / (self.cfg.collapsed_height - HANDLE_H)).clamp(0.0, 1.0)
     }
 
+    /// Pill width taken by everything but the text: badge, gaps, buttons
+    /// (matches `Renderer::paint_compact`).
+    fn agent_card_chrome(&self, actions: &[String]) -> f32 {
+        let h = self.cfg.collapsed_height;
+        let buttons = layout::toast_actions(1000.0, h, actions);
+        let used = 1000.0 - buttons.first().map_or(1000.0, |b| b.x);
+        h + 4.0 + 8.0 + used
+    }
+
+    /// Widest an agent card gets: the window's width. Longer text loses
+    /// the ✓ button.
+    fn agent_card_max_w(&self) -> f32 {
+        self.cfg.expanded_width.max(self.cfg.collapsed_media_width)
+    }
+
     fn collapsed_width(&self) -> f32 {
         if let Some(t) = self.compact.toast.as_ref().filter(|t| !t.actions.is_empty()) {
-            // Room for the badge, some text and every button.
-            let h = self.cfg.collapsed_height;
-            let buttons = layout::toast_actions(1000.0, h, &t.actions);
-            let used = 1000.0 - buttons.first().map_or(1000.0, |b| b.x);
-            return (h + 4.0 + 170.0 + used).clamp(self.cfg.collapsed_media_width, 600.0);
+            // Room for the badge, the text (an agent card's in full) and
+            // every button.
+            let text_w = if matches!(self.alarm, Some(Alarm::Agent(_))) { self.agent_text_w + 2.0 } else { 170.0 };
+            return (self.agent_card_chrome(&t.actions) + text_w).clamp(self.cfg.collapsed_media_width, self.agent_card_max_w());
         }
         if self.compact.media.is_some() || self.compact.toast.is_some() {
             self.cfg.collapsed_media_width
@@ -2041,7 +2058,19 @@ impl Island {
             },
             Alarm::Agent(id) => {
                 let Some(card) = self.agent_cards.iter().find(|c| c.id == *id) else { return };
-                Toast { badge: Badge::Text("AI".into()), title: card.msg.title.clone(), text: card.msg.text.clone(), level: None, actions: card.msg.options.clone() }
+                let (title, text) = (card.msg.title.clone(), card.msg.text.clone());
+                let mut actions = card.msg.options.clone();
+                let widths = self.renderer.as_ref().and_then(|r| r.pill_text_widths(&title, &text));
+                let shown_in_full = !agent::has_hidden(&title) && !agent::has_hidden(&text) && widths.is_some_and(|(a, b)| {
+                    let room = self.agent_card_max_w() - self.agent_card_chrome(&actions);
+                    a <= room && b <= room
+                });
+                if !shown_in_full {
+                    // Allowing is only offered for what the card shows whole.
+                    actions.retain(|a| a != "✓");
+                }
+                self.agent_text_w = widths.map_or(0.0, |(a, b)| a.max(b));
+                Toast { badge: Badge::Text("AI".into()), title, text, level: None, actions }
             }
         };
         self.alarm = Some(alarm);
