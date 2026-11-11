@@ -11,6 +11,8 @@ const HOOK =
   process.env.WIN_ISLAND_HOOK ??
   join(homedir(), "Documents", "win-island", "target", "release", "island-hook.exe")
 
+const LINE_BREAK = /[\r\n]/
+
 /** Sends one message to the island; resolves to the pressed button or null. */
 function island(msg, waitSeconds = 50) {
   return new Promise((resolve) => {
@@ -43,8 +45,7 @@ export const WinIsland = async ({ directory }) => {
       const text = where(pattern)
       // ✓ only when the card shows all of it; "Терминал" leaves the
       // question to opencode's own prompt.
-      const complete = pattern !== "" && !/[
-]/.test(text) && text.length <= 160
+      const complete = pattern !== "" && !LINE_BREAK.test(text) && text.length <= 160
       const choice = await island({
         kind: "ask",
         title: input.title || "Разрешить?",
