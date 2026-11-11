@@ -83,6 +83,17 @@ pub struct Scene<'a> {
     pub search: Option<&'a SearchView>,
     /// Files on the shelf (glyph, name, folder).
     pub shelf: &'a [ClipRow],
+    pub text: Option<&'a TextView>,
+}
+
+/// The Text tab; part of the panel cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextView {
+    pub field: TextField,
+    pub focus: bool,
+    pub stats: String,
+    pub status: String,
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +164,8 @@ pub enum Badge {
     Mic,
     Timer,
     Bell,
+    /// A color swatch (eyedropper).
+    Color([u8; 3]),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +248,7 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    text: Option<TextView>,
     shelf: Vec<ClipRow>,
     search: Option<SearchView>,
     tab: Tab,
@@ -295,6 +309,7 @@ struct Fonts {
     small: IDWriteTextFormat,
     small_right: IDWriteTextFormat,
     lyric: IDWriteTextFormat,
+    small_center: IDWriteTextFormat,
     note: IDWriteTextFormat,
     big: IDWriteTextFormat,
     tab: IDWriteTextFormat,
@@ -550,7 +565,11 @@ impl Renderer {
             big.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             let tab = make(12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
             tab.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let small_center = make(10.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+            small_center.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            small_center.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             self.fonts = Some(Fonts {
+                small_center,
                 note,
                 big,
                 tab,
@@ -1171,6 +1190,10 @@ impl Renderer {
                 self.fill_rect(ink, D2D_RECT_F { left: cx - 6.5 * k, top: cy - 4.0 * k, right: cx + 2.5 * k, bottom: cy + 4.0 * k }, 1.5 * k);
                 self.fill_polygon(ink, &[(cx + 3.0 * k, cy - 1.0 * k), (cx + 7.0 * k, cy - 4.0 * k), (cx + 7.0 * k, cy + 4.0 * k), (cx + 3.0 * k, cy + 1.0 * k)]);
             }
+            Badge::Color(c) => {
+                let fill = [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0];
+                self.fill_circle(fill, cx, cy, side / 2.0 - 4.0 * k);
+            }
             Badge::Mic => {
                 self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy + 2.0 * k }, 2.5 * k);
                 self.line(ink, cx - 5.0 * k, cy - 1.0 * k, cx - 5.0 * k + 0.01, cy + 1.5 * k, 1.3 * k);
@@ -1370,6 +1393,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            text: if scene.tab == Tab::Text { scene.text.cloned() } else { None },
             shelf: if scene.tab == Tab::Shelf { scene.shelf.to_vec() } else { Vec::new() },
             search: if scene.tab == Tab::Search { scene.search.cloned() } else { None },
             tab: scene.tab,
@@ -1416,6 +1440,11 @@ impl Renderer {
             Tab::Home => self.paint_tiles(scene),
             Tab::Clipboard => self.paint_list(scene, scene.clip_page, Hit::Clip, "История пуста — скопируйте что-нибудь"),
             Tab::Shelf => self.paint_list(scene, scene.shelf, Hit::ShelfRow, "Перетащите файлы на остров — они полежат здесь"),
+            Tab::Text => {
+                if let Some(t) = scene.text {
+                    self.paint_text_page(scene, t);
+                }
+            }
             Tab::Notes => {
                 if let Some(n) = scene.notes {
                     self.paint_notes(scene, n);
@@ -1455,6 +1484,10 @@ impl Renderer {
                     self.fill_rect(ink, D2D_RECT_F { left: cx - 2.5 * k, top: cy - 7.0 * k, right: cx + 2.5 * k, bottom: cy - 4.0 * k }, 1.0 * k);
                 }
                 Tab::Search => {}
+                Tab::Text => {
+                    self.line(ink, cx - 5.5 * k, cy - 5.5 * k, cx + 5.5 * k, cy - 5.5 * k, 1.8 * k);
+                    self.line(ink, cx, cy - 5.5 * k, cx, cy + 6.0 * k, 1.8 * k);
+                }
                 Tab::Shelf => {
                     // An open tray.
                     self.line(ink, cx - 6.0 * k, cy - 1.0 * k, cx - 6.0 * k, cy + 5.0 * k, 1.5 * k);
@@ -1678,6 +1711,110 @@ impl Renderer {
         }
     }
 
+    fn paint_tools(&self, tile: &Placed, scene: &Scene, k: f32, th: &Theme) {
+        let fonts = self.fonts.as_ref().unwrap();
+        for (i, rc) in layout::tool_buttons(tile).into_iter().enumerate() {
+            let r = D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+            if scene.hot == Some(Hit::Tool(i)) {
+                self.fill_rect(th.tile_hover, r, 10.0 * k);
+            }
+            let (cx, cy) = ((r.left + r.right) / 2.0, r.top + 16.0 * k);
+            let ink = th.text;
+            match i {
+                0 => {
+                    // Area: corner brackets.
+                    for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                        let (x, y) = (cx + sx * 7.0 * k, cy + sy * 6.0 * k);
+                        self.line(ink, x, y, x - sx * 4.0 * k, y, 1.6 * k);
+                        self.line(ink, x, y, x, y - sy * 4.0 * k, 1.6 * k);
+                    }
+                }
+                1 => unsafe {
+                    self.brush.SetColor(&color(ink, 1.0));
+                    let rr = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: cx - 8.0 * k, top: cy - 6.0 * k, right: cx + 8.0 * k, bottom: cy + 4.0 * k }, radiusX: 1.5 * k, radiusY: 1.5 * k };
+                    self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.5 * k, None);
+                    self.line(ink, cx - 4.0 * k, cy + 7.0 * k, cx + 4.0 * k, cy + 7.0 * k, 1.5 * k);
+                },
+                2 => {
+                    // Text from screen: T inside brackets.
+                    self.line(ink, cx - 4.0 * k, cy - 4.0 * k, cx + 4.0 * k, cy - 4.0 * k, 1.6 * k);
+                    self.line(ink, cx, cy - 4.0 * k, cx, cy + 5.0 * k, 1.6 * k);
+                    for sx in [-1.0f32, 1.0] {
+                        let x = cx + sx * 8.0 * k;
+                        self.line(ink, x, cy - 6.0 * k, x, cy + 6.0 * k, 1.4 * k);
+                    }
+                }
+                3 => {
+                    for (dx, dy) in [(-4.5, -4.5), (4.5, -4.5), (-4.5, 4.5)] {
+                        let (x, y) = (cx + dx * k, cy + dy * k);
+                        unsafe {
+                            self.brush.SetColor(&color(ink, 1.0));
+                            let rr = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: x - 3.0 * k, top: y - 3.0 * k, right: x + 3.0 * k, bottom: y + 3.0 * k }, radiusX: 0.5 * k, radiusY: 0.5 * k };
+                            self.dc.DrawRoundedRectangle(&rr, &self.brush, 1.3 * k, None);
+                        }
+                    }
+                    self.fill_rect(ink, D2D_RECT_F { left: cx + 2.5 * k, top: cy + 2.5 * k, right: cx + 6.5 * k, bottom: cy + 6.5 * k }, 0.5 * k);
+                }
+                4 => {
+                    // Dropper.
+                    self.line(ink, cx - 6.0 * k, cy + 6.0 * k, cx + 2.0 * k, cy - 2.0 * k, 2.0 * k);
+                    self.fill_circle(ink, cx + 4.0 * k, cy - 4.0 * k, 3.2 * k);
+                }
+                5 => {
+                    self.line(ink, cx - 5.0 * k, cy - 5.0 * k, cx + 5.0 * k, cy - 5.0 * k, 1.6 * k);
+                    self.line(ink, cx, cy - 5.0 * k, cx, cy + 6.0 * k, 1.6 * k);
+                    self.line(ink, cx - 7.0 * k, cy + 6.0 * k, cx + 7.0 * k, cy - 7.0 * k, 1.3 * k);
+                }
+                _ => {
+                    unsafe {
+                        self.brush.SetColor(&color(ink, 1.0));
+                        let e = D2D1_ELLIPSE { point: pt(cx - 1.5 * k, cy - 1.5 * k), radiusX: 5.0 * k, radiusY: 5.0 * k };
+                        self.dc.DrawEllipse(&e, &self.brush, 1.5 * k, None);
+                    }
+                    self.line(ink, cx + 2.0 * k, cy + 2.0 * k, cx + 6.0 * k, cy + 6.0 * k, 1.7 * k);
+                }
+            }
+            unsafe {
+                self.brush.SetColor(&color(th.subtext, 1.0));
+                let label = D2D_RECT_F { left: r.left, top: r.top + 30.0 * k, right: r.right, bottom: r.bottom - 2.0 * k };
+                let s: Vec<u16> = layout::TOOLS[i].encode_utf16().collect();
+                self.dc.DrawText(&s, &fonts.small_center, &label, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        }
+    }
+
+    fn paint_text_page(&self, scene: &Scene, t: &TextView) {
+        let fonts = self.fonts.as_ref().unwrap();
+        let (k, th) = (scene.scale, scene.theme);
+        let r = layout::text_regions(scene.panel_size.0);
+        let px = |rc: Rect| D2D_RECT_F { left: rc.x * k, top: rc.y * k, right: (rc.x + rc.w) * k, bottom: (rc.y + rc.h) * k };
+        self.fill_rect(th.tile, px(r.card), 14.0 * k);
+        self.paint_field(&t.field, r.field, t.focus, "Вставьте текст или распознайте его с экрана", &fonts.note, false, k, th);
+        let text = |s: &str, fmt: &IDWriteTextFormat, rc: Rect, c: Rgba| unsafe {
+            self.brush.SetColor(&color(c, 1.0));
+            let w: Vec<u16> = s.encode_utf16().collect();
+            self.dc.DrawText(&w, fmt, &px(rc), &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        };
+        text(&t.stats, &fonts.small, r.stats, th.subtext);
+        text(&t.status, &fonts.small, r.status, th.accent);
+        let copy = px(r.copy);
+        self.fill_rect(if scene.hot == Some(Hit::TextCopy) { th.tile_hover } else { th.tile_hover }, copy, 8.0 * k);
+        text("Копировать", &fonts.lyric, r.copy, th.text);
+        for (i, rc) in r.ops.iter().enumerate() {
+            let b = px(*rc);
+            let fill = if scene.hot == Some(Hit::TextOp(i)) { th.tile_hover } else { th.tile };
+            self.fill_rect(fill, b, 8.0 * k);
+            text(crate::text_tools::OPS[i].label(), &fonts.lyric, *rc, th.text);
+        }
+        let tr = px(r.translate);
+        let mut fill = th.accent;
+        if t.busy {
+            fill[3] = 0.5;
+        }
+        self.fill_rect(fill, tr, 10.0 * k);
+        text(if t.busy { "Перевожу…" } else { "Перевести" }, &fonts.lyric, r.translate, [1.0; 4]);
+    }
+
     /// A page of rows (Clipboard tab, Shelf tab).
     fn paint_list(&self, scene: &Scene, list: &[ClipRow], hit: fn(usize) -> Hit, empty: &str) {
         let fonts = self.fonts.as_ref().unwrap();
@@ -1744,6 +1881,10 @@ impl Renderer {
                 }
                 if tile.kind == TileKind::Window {
                     self.paint_window_tile(tile, scene, k, th);
+                    continue;
+                }
+                if tile.kind == TileKind::Tools {
+                    self.paint_tools(tile, scene, k, th);
                     continue;
                 }
                 if tile.kind == TileKind::Apps {

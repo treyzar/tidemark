@@ -18,11 +18,16 @@ use crate::notes::{self, Reminder};
 use crate::textinput::TextField;
 use crate::timer::{self, Timer};
 use crate::fullscreen::{self, ABN_FULLSCREENAPP, WM_APPBAR, WM_FOREGROUND};
+use crate::overlay::{self, WM_OVERLAY_DONE};
+use crate::recognize::{self, WM_OCR};
 use crate::shelf::{self, WM_SHELF_DRAG, WM_SHELF_DROP};
+use crate::translate::{self, WM_TRANSLATED};
+use crate::{capture, text_tools};
+use std::sync::{Arc, Mutex};
 use crate::{clipboard, dock};
 use crate::media::{self, Command, MediaState, WM_MEDIA};
 use crate::lyrics::{self, Lines, WM_LYRICS};
-use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, SearchRow, SearchView, Shape, TimerUi, Toast, WindowView};
+use crate::render::{Badge, ClipRow, Compact, CompactMedia, DockIcon, MediaView, NotesView, Renderer, Scene, SearchRow, SearchView, Shape, TextView, TimerUi, Toast, WindowView};
 use crate::stats::Stats;
 use crate::theme::Theme;
 use crate::tray::{self, TrayAction};
@@ -209,6 +214,16 @@ pub struct Island {
     shelf_target: Option<shelf::Target>,
     /// Shelf row pressed at (x, y): becomes a drag-out once the cursor moves.
     shelf_press: Option<(usize, i32, i32)>,
+    /// The Text tab's contents.
+    text: TextField,
+    text_status: String,
+    text_view: Option<TextView>,
+    ocr_slot: Arc<Mutex<Option<String>>>,
+    translate_slot: Arc<Mutex<Option<Option<String>>>>,
+    translating: bool,
+    /// The next clipboard change is ours and already announced: record it
+    /// in the history without the generic "Скопировано" notice.
+    quiet_next_clip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +241,7 @@ enum Focus {
     Note,
     Remind,
     Search,
+    Text,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -358,6 +374,13 @@ pub fn create(cfg: Config) -> Result<HWND> {
             shelf_rows: Vec::new(),
             shelf_target: None,
             shelf_press: None,
+            text: TextField::new(true),
+            text_status: String::new(),
+            text_view: None,
+            ocr_slot: Arc::new(Mutex::new(None)),
+            translate_slot: Arc::new(Mutex::new(None)),
+            translating: false,
+            quiet_next_clip: false,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
         };
         island.top_gap = Spring::new(island.cfg.top_offset, STIFFNESS, DAMPING);
@@ -856,6 +879,19 @@ impl Island {
                     .position(|r| Rect { w, ..*r }.contains(dx, dy))
                     .map(Hit::ShelfRow);
             }
+            Tab::Text => {
+                let r = layout::text_regions(self.cfg.expanded_width);
+                if r.copy.contains(dx, dy) {
+                    return Some(Hit::TextCopy);
+                }
+                if r.translate.contains(dx, dy) {
+                    return Some(Hit::TextTranslate);
+                }
+                if let Some(i) = r.ops.iter().position(|o| o.contains(dx, dy)) {
+                    return Some(Hit::TextOp(i));
+                }
+                return r.card.contains(dx, dy).then_some(Hit::TextField);
+            }
             Tab::Notes => {
                 let r = layout::notes_regions(self.cfg.expanded_width);
                 if r.toggle.contains(dx, dy) {
@@ -895,6 +931,7 @@ impl Island {
                 .take(self.clip_rows.len())
                 .position(|r| r.contains(dx, dy))
                 .map(Hit::Clip),
+            TileKind::Tools => layout::tool_buttons(tile).iter().position(|r| r.contains(dx, dy)).map(Hit::Tool),
             TileKind::Apps => {
                 let (slots, add) = layout::dock_slots(tile, self.dock_icons.len());
                 slots.iter().position(|r| r.contains(dx, dy)).map(Hit::Dock).or_else(|| add.contains(dx, dy).then_some(Hit::DockAdd))
@@ -938,6 +975,19 @@ impl Island {
             Some(Hit::NoteField) => self.set_focus(Focus::Note),
             Some(Hit::SearchField) => self.set_focus(Focus::Search),
             Some(Hit::SearchRow(i)) => self.open_hit(i, false),
+            Some(Hit::Tool(i)) => self.run_tool(i),
+            Some(Hit::TextField) => self.set_focus(Focus::Text),
+            Some(Hit::TextOp(i)) => self.text_op(i),
+            Some(Hit::TextTranslate) => self.translate_text(),
+            Some(Hit::TextCopy) => {
+                let text = self.text.selected_text().unwrap_or_else(|| self.text.text.clone());
+                if !text.is_empty() {
+                    self.quiet_next_clip = true;
+                    clipboard::write(self.hwnd, &Entry::Text { text });
+                    self.text_status = "Скопировано".into();
+                    self.refresh_text_view();
+                }
+            }
             Some(Hit::ShelfRow(i)) => {
                 // Open on release unless it turns into a drag.
                 self.shelf_press = Some((i, x, y));
@@ -1046,6 +1096,7 @@ impl Island {
             self.save_note();
         }
         self.focus = focus;
+        self.refresh_text_view();
         if focus != Focus::None {
             // Typing needs the keyboard: make the island the active window.
             unsafe {
@@ -1061,11 +1112,17 @@ impl Island {
             Focus::Note => Some(&mut self.note),
             Focus::Remind => Some(&mut self.remind),
             Focus::Search => Some(&mut self.search),
+            Focus::Text => Some(&mut self.text),
             Focus::None => None,
         }
     }
 
     fn after_edit(&mut self) {
+        if self.focus == Focus::Text {
+            self.text_status.clear();
+            self.refresh_text_view();
+            return;
+        }
         if self.focus == Focus::Search {
             self.run_search();
             return;
@@ -1114,7 +1171,7 @@ impl Island {
         let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
         let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
         let hwnd = self.hwnd;
-        let multiline = self.focus == Focus::Note;
+        let multiline = matches!(self.focus, Focus::Note | Focus::Text);
         if self.focus == Focus::Search {
             let n = self.search_hits.len();
             match VIRTUAL_KEY(vk) {
@@ -1386,6 +1443,183 @@ impl Island {
         self.last_frame = None;
         unsafe {
             SetTimer(Some(self.hwnd), TIMER_COLLAPSE, 1500, None);
+        }
+    }
+
+    /// Tools tile button `i` (layout::TOOLS order).
+    fn run_tool(&mut self, i: usize) {
+        match i {
+            0 => self.start_overlay(overlay::Mode::Snip),
+            1 => self.full_screen_shot(),
+            2 => self.start_overlay(overlay::Mode::Ocr),
+            3 => self.start_overlay(overlay::Mode::Qr),
+            4 => self.start_overlay(overlay::Mode::Picker),
+            5 => self.plain_text(),
+            _ => self.open_search(),
+        }
+    }
+
+    /// Takes the island out of the picture, then grabs the screen.
+    fn grab_without_island(&mut self, area: Option<RECT>) -> Option<capture::Shot> {
+        self.set_focus(Focus::None);
+        self.set_hover(false);
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+        let shot = match area {
+            Some(r) => capture::grab(r).map(|image| capture::Shot { x: r.left, y: r.top, image }),
+            None => capture::shoot(),
+        };
+        unsafe {
+            if !self.window_hidden {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+        shot
+    }
+
+    fn start_overlay(&mut self, mode: overlay::Mode) {
+        if overlay::is_open() {
+            return;
+        }
+        if let Some(shot) = self.grab_without_island(None) {
+            overlay::open(self.hwnd, mode, shot, self.scale);
+        }
+    }
+
+    fn full_screen_shot(&mut self) {
+        if let Some(shot) = self.grab_without_island(Some(capture::cursor_monitor())) {
+            clipboard::write_image(self.hwnd, &shot.image);
+        }
+    }
+
+    /// Re-puts the clipboard text without formatting.
+    fn plain_text(&mut self) {
+        let Some(text) = clipboard::read_text(self.hwnd).filter(|t| !t.is_empty()) else {
+            self.show_toast(Toast { badge: Badge::Glyph(clip_history::Glyph::Text), title: "В буфере нет текста".into(), text: String::new(), level: None, actions: Vec::new() }, TOAST_MS);
+            return;
+        };
+        self.quiet_next_clip = true;
+        clipboard::write(self.hwnd, &Entry::Text { text: text.clone() });
+        self.show_toast(Toast { badge: Badge::Glyph(clip_history::Glyph::Text), title: "Текст без оформления".into(), text, level: None, actions: Vec::new() }, TOAST_MS);
+    }
+
+    fn overlay_done(&mut self) {
+        match overlay::take_result() {
+            Some(overlay::Outcome::Snip(img)) => {
+                // The clipboard listener records it and says "Скопировано".
+                clipboard::write_image(self.hwnd, &img);
+            }
+            Some(overlay::Outcome::Area(overlay::Mode::Qr, img)) => match recognize::qr(&img) {
+                Some(text) => {
+                    self.quiet_next_clip = true;
+                    clipboard::write(self.hwnd, &Entry::Text { text: text.clone() });
+                    let link = text.starts_with("http://") || text.starts_with("https://");
+                    let badge = Badge::Glyph(if link { clip_history::Glyph::Link } else { clip_history::Glyph::Text });
+                    self.show_toast(Toast { badge, title: "QR-код скопирован".into(), text, level: None, actions: Vec::new() }, TOAST_MS);
+                }
+                None => {
+                    self.show_toast(Toast { badge: Badge::Glyph(clip_history::Glyph::Image), title: "QR-код не найден".into(), text: "Выделите код целиком".into(), level: None, actions: Vec::new() }, TOAST_MS);
+                }
+            },
+            Some(overlay::Outcome::Area(_, img)) => {
+                self.text_status = "Распознаю…".into();
+                recognize::spawn_ocr(self.hwnd, img, self.ocr_slot.clone());
+            }
+            Some(overlay::Outcome::Color(c)) => {
+                let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+                self.quiet_next_clip = true;
+                clipboard::write(self.hwnd, &Entry::Text { text: hex.clone() });
+                let text = format!("{hex} · rgb({}, {}, {})", c[0], c[1], c[2]);
+                self.show_toast(Toast { badge: Badge::Color(c), title: "Цвет скопирован".into(), text, level: None, actions: Vec::new() }, TOAST_MS);
+            }
+            Some(overlay::Outcome::Cancelled) | None => {}
+        }
+    }
+
+    /// OCR finished: show the text in the Text tab, ready to edit.
+    fn ocr_done(&mut self) {
+        let Some(text) = self.ocr_slot.lock().unwrap().take() else { return };
+        if text.trim().is_empty() {
+            self.text_status.clear();
+            self.show_toast(Toast { badge: Badge::Glyph(clip_history::Glyph::Text), title: "Текст не найден".into(), text: "Попробуйте выделить крупнее".into(), level: None, actions: Vec::new() }, TOAST_MS);
+            return;
+        }
+        let lines = text.lines().count();
+        self.text = TextField::with_text(&text, true);
+        self.text_status = format!("Распознано строк: {lines}");
+        self.show_text_tab();
+    }
+
+    fn show_text_tab(&mut self) {
+        if self.tab != Tab::Text {
+            self.tab = Tab::Text;
+            self.panel_height = self.tab_height(Tab::Text);
+            self.dirty = true;
+        }
+        if self.hovered {
+            self.height.target = self.panel_height;
+            self.last_frame = None;
+        } else {
+            self.set_hover(true);
+        }
+        // Keeps the island open (it has the keyboard) until clicked away.
+        self.set_focus(Focus::Text);
+        self.refresh_text_view();
+    }
+
+    fn text_op(&mut self, i: usize) {
+        let op = text_tools::OPS[i];
+        let (start, end) = self.text.selection().unwrap_or((0, self.text.len()));
+        let part: String = self.text.text.chars().skip(start).take(end - start).collect();
+        match text_tools::apply(op, &part) {
+            Some(out) => {
+                let mut f = self.text.clone();
+                f.anchor = Some(start);
+                f.caret = end;
+                f.insert(&out);
+                f.anchor = Some(start);
+                self.text = f;
+                self.text_status = op.label().to_string();
+            }
+            None => self.text_status = format!("«{}» не подходит к этому тексту", op.label()),
+        }
+        self.refresh_text_view();
+    }
+
+    fn translate_text(&mut self) {
+        if self.translating || self.text.text.trim().is_empty() {
+            return;
+        }
+        self.translating = true;
+        self.text_status = "Перевожу…".into();
+        translate::spawn(self.hwnd, self.text.text.clone(), self.translate_slot.clone());
+        self.refresh_text_view();
+    }
+
+    fn translated(&mut self) {
+        self.translating = false;
+        match self.translate_slot.lock().unwrap().take().flatten() {
+            Some(t) => {
+                self.text = TextField::with_text(&t, true);
+                self.text_status = "Переведено".into();
+            }
+            None => self.text_status = "Перевод не удался — нет связи с сервисом".into(),
+        }
+        self.refresh_text_view();
+    }
+
+    fn refresh_text_view(&mut self) {
+        let view = TextView {
+            field: self.text.clone(),
+            focus: self.focus == Focus::Text,
+            stats: text_tools::stats(&self.text.text),
+            status: self.text_status.clone(),
+            busy: self.translating,
+        };
+        if Some(&view) != self.text_view.as_ref() {
+            self.text_view = Some(view);
+            self.dirty = true;
         }
     }
 
@@ -1708,12 +1942,13 @@ impl Island {
         }
         let Some(entry) = clipboard::read(self.hwnd) else { return };
         let (glyph, text) = clip_history::label(&entry);
+        let quiet = std::mem::take(&mut self.quiet_next_clip);
         for file in self.history.push(entry, unix_now()) {
             let _ = std::fs::remove_file(clip_history::dir().join(file));
         }
         self.history.save();
         self.refresh_clip_rows();
-        if !self.hovered {
+        if !self.hovered && !quiet {
             self.show_toast(Toast { badge: Badge::Glyph(glyph), title: "Скопировано".into(), text, level: None, actions: Vec::new() }, TOAST_MS);
         }
     }
@@ -2035,6 +2270,7 @@ impl Island {
             clip_page: &self.clip_page,
             search: self.search_view.as_ref(),
             shelf: &self.shelf_rows,
+            text: self.text_view.as_ref(),
         };
         let started = Instant::now();
         let (failed, rebuilt) = match self.renderer.as_mut().map(|r| r.draw(&scene)) {
@@ -2106,7 +2342,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let _ = ScreenToClient(hwnd, &mut pt);
-            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField | Hit::SearchField)));
+            let field = with_island(|i| matches!(i.hit_at(pt.x, pt.y), Some(Hit::NoteField | Hit::RemindField | Hit::SearchField | Hit::TextField)));
             return LRESULT(if field == Some(true) { MA_ACTIVATE } else { MA_NOACTIVATE } as isize);
         }
         WM_ACTIVATE => {
@@ -2437,6 +2673,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_LAUNCHER => {
             with_island(|i| if i.tab == Tab::Search { i.close_search() } else { i.open_search() });
+            return LRESULT(0);
+        }
+        WM_OVERLAY_DONE => {
+            with_island(|i| i.overlay_done());
+            return LRESULT(0);
+        }
+        WM_OCR => {
+            with_island(|i| i.ocr_done());
+            return LRESULT(0);
+        }
+        WM_TRANSLATED => {
+            with_island(|i| i.translated());
             return LRESULT(0);
         }
         WM_SHELF_DRAG => {

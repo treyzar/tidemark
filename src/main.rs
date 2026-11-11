@@ -19,6 +19,7 @@ mod lyrics;
 mod legacy_players;
 mod media;
 mod notes;
+mod overlay;
 mod privacy;
 mod recognize;
 mod render;

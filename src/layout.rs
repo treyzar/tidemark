@@ -38,7 +38,7 @@ impl TileKind {
         match self {
             Self::Media => (2, 2),
             Self::Clipboard => (2, 2),
-            Self::Tools => (2, 1),
+            Self::Tools => (4, 1),
             Self::Weather => (2, 1),
             Self::Apps => (4, 1),
             Self::Window => (4, 1),
@@ -200,6 +200,13 @@ pub enum Hit {
     SearchField,
     /// File `n` on the shelf.
     ShelfRow(usize),
+    /// Button `n` of the Tools tile (see TOOLS).
+    Tool(usize),
+    TextField,
+    /// Transform `n` of text_tools::OPS.
+    TextOp(usize),
+    TextTranslate,
+    TextCopy,
     /// Search result `n`.
     SearchRow(usize),
 }
@@ -211,11 +218,12 @@ pub enum Tab {
     Clipboard,
     Notes,
     Shelf,
+    Text,
     /// Alt+Space search; not in the tab row.
     Search,
 }
 
-pub const TABS: [Tab; 4] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf];
+pub const TABS: [Tab; 5] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf, Tab::Text];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -224,6 +232,7 @@ impl Tab {
             Tab::Clipboard => "Буфер",
             Tab::Notes => "Заметки",
             Tab::Shelf => "Полка",
+            Tab::Text => "Текст",
             Tab::Search => "Поиск",
         }
     }
@@ -308,6 +317,49 @@ pub fn search_field(width: f32) -> Rect {
 
 pub fn search_rows(width: f32) -> Vec<Rect> {
     (0..SEARCH_ROWS).map(|i| Rect { x: PAD, y: 62.0 + i as f32 * 38.0, w: width - 2.0 * PAD, h: 36.0 }).collect()
+}
+
+pub const TOOLS: [&str; 7] = ["Область", "Весь экран", "Текст", "QR-код", "Пипетка", "Без формата", "Команда"];
+
+/// Buttons of the Tools tile, left to right.
+pub fn tool_buttons(tile: &Placed) -> Vec<Rect> {
+    let n = TOOLS.len() as f32;
+    let gap = 6.0;
+    let w = (tile.w - 16.0 - gap * (n - 1.0)) / n;
+    (0..TOOLS.len()).map(|i| Rect { x: tile.x + 8.0 + i as f32 * (w + gap), y: tile.y + 6.0, w, h: tile.h - 12.0 }).collect()
+}
+
+/// Parts of the Text tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRegions {
+    pub card: Rect,
+    pub field: Rect,
+    pub stats: Rect,
+    pub copy: Rect,
+    pub status: Rect,
+    pub ops: Vec<Rect>,
+    pub translate: Rect,
+}
+
+pub fn text_regions(width: f32) -> TextRegions {
+    let top = TAB_BAR_H;
+    let inner = width - 2.0 * PAD;
+    let lw = (inner - GAP) * 0.56;
+    let h = PAGE_H - PAD;
+    let card = Rect { x: PAD, y: top, w: lw, h };
+    let rx = PAD + lw + GAP;
+    let rw = inner - lw - GAP;
+    let bw = (rw - 6.0) / 2.0;
+    let ops = (0..12).map(|i| Rect { x: rx + (i % 2) as f32 * (bw + 6.0), y: top + (i / 2) as f32 * 34.0, w: bw, h: 30.0 }).collect();
+    TextRegions {
+        field: Rect { x: PAD + 12.0, y: top + 12.0, w: lw - 24.0, h: h - 56.0 },
+        stats: Rect { x: PAD + 12.0, y: top + h - 36.0, w: lw - 120.0, h: 16.0 },
+        status: Rect { x: PAD + 12.0, y: top + h - 20.0, w: lw - 120.0, h: 16.0 },
+        copy: Rect { x: PAD + lw - 100.0, y: top + h - 38.0, w: 88.0, h: 28.0 },
+        card,
+        ops,
+        translate: Rect { x: rx, y: top + 6.0 * 34.0 + 4.0, w: rw, h: 34.0 },
+    }
 }
 
 /// Rows of the Clipboard tab.
@@ -398,15 +450,14 @@ mod tests {
     use TileKind::*;
 
     #[test]
-    fn default_home_packs_into_four_rows() {
-        let (tiles, h) = pack(&[Media, Clipboard, Tools, Weather, Apps], 560.0);
+    fn default_home_packs_into_five_rows() {
+        let (tiles, h) = pack(&[Media, Clipboard, Window, Tools, Apps], 560.0);
         assert_eq!(tiles.len(), 5);
-        // Media and clipboard side by side, then tools + weather, then apps.
+        // Media and clipboard side by side, then three full-width rows.
         assert_eq!(tiles[0].y, tiles[1].y);
         assert!(tiles[1].x > tiles[0].x);
-        assert_eq!(tiles[2].y, tiles[3].y);
-        assert!(tiles[4].y > tiles[2].y);
-        assert_eq!(h, PAD * 2.0 + 4.0 * ROW_H + 3.0 * GAP);
+        assert!(tiles[2].y > tiles[0].y && tiles[3].y > tiles[2].y && tiles[4].y > tiles[3].y);
+        assert_eq!(h, PAD * 2.0 + 5.0 * ROW_H + 4.0 * GAP);
     }
 
     #[test]
@@ -420,8 +471,8 @@ mod tests {
 
     #[test]
     fn tiles_fill_gaps_left_by_shorter_ones() {
-        // Tools (1 row) next to Media (2 rows): Weather fits under Tools.
-        let (tiles, _) = pack(&[Media, Tools, Weather], 560.0);
+        // A 1-row tile next to Media (2 rows): the next one fits under it.
+        let (tiles, _) = pack(&[Media, Weather, Weather], 560.0);
         assert_eq!(tiles[2].x, tiles[1].x);
         assert_eq!(tiles[2].y, PAD + ROW_H + GAP);
     }
@@ -484,7 +535,7 @@ mod tests {
     #[test]
     fn tabs_and_pages_fit() {
         let tabs = tab_buttons(Tab::Notes);
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 5);
         assert_eq!(tabs[2].1.w, 100.0);
         let r = notes_regions(560.0);
         assert!(r.note_card.x + r.note_card.w < r.timer_card.x);
@@ -497,6 +548,18 @@ mod tests {
         assert!(r.remind_card.y + r.remind_card.h <= TAB_BAR_H + PAGE_H);
         let rows = clip_page_rows();
         assert!(rows.last().unwrap().y + 32.0 <= TAB_BAR_H + PAGE_H);
+    }
+
+    #[test]
+    fn tools_and_text_page_fit() {
+        let (tiles, _) = pack(&[Tools], 560.0);
+        let b = tool_buttons(&tiles[0]);
+        assert_eq!(b.len(), 7);
+        assert!(b[6].x + b[6].w <= tiles[0].x + tiles[0].w + 0.01);
+        let r = text_regions(560.0);
+        assert!(r.card.x + r.card.w < r.ops[0].x);
+        assert!(r.translate.y + r.translate.h <= TAB_BAR_H + PAGE_H);
+        assert!(r.ops[11].x + r.ops[11].w <= 560.0 - PAD + 0.01);
     }
 
     #[test]

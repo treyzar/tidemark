@@ -66,8 +66,10 @@ pub struct Config {
     pub gpu: bool,
 }
 
-const DEFAULT_TILES: [&str; 6] = ["media", "clipboard", "window", "weather", "tools", "apps"];
-const OLD_DEFAULT_TILES: [&str; 5] = ["media", "clipboard", "tools", "weather", "apps"];
+const DEFAULT_TILES: [&str; 5] = ["media", "clipboard", "window", "tools", "apps"];
+/// Defaults of earlier versions, upgraded on load.
+const OLD_DEFAULT_TILES: [[&str; 6]; 1] = [["media", "clipboard", "window", "weather", "tools", "apps"]];
+const OLDEST_DEFAULT_TILES: [&str; 5] = ["media", "clipboard", "tools", "weather", "apps"];
 
 impl Default for Config {
     fn default() -> Self {
@@ -112,7 +114,7 @@ impl Config {
 
     /// Brings configs written by older versions up to date.
     fn upgrade(mut self) -> Self {
-        if self.home_tiles == OLD_DEFAULT_TILES.map(String::from) {
+        if self.home_tiles == OLDEST_DEFAULT_TILES.map(String::from) || OLD_DEFAULT_TILES.iter().any(|d| self.home_tiles == d.map(String::from)) {
             self.home_tiles = DEFAULT_TILES.map(String::from).to_vec();
         }
         self
@@ -167,7 +169,9 @@ mod tests {
         // Fields from earlier versions (color, expanded_height) are ignored.
         let cfg: Config = toml::from_str("color = \"#000000\"\nexpanded_height = 220.0\ntheme = \"dark\"").unwrap();
         assert_eq!(cfg.theme, "dark");
-        assert_eq!(cfg.home_tiles.len(), 6);
+        assert_eq!(cfg.home_tiles.len(), 5);
+        let v2: Config = toml::from_str("home_tiles = [\"media\", \"clipboard\", \"window\", \"weather\", \"tools\", \"apps\"]").unwrap();
+        assert_eq!(v2.upgrade().home_tiles, DEFAULT_TILES.map(String::from));
         // A config saved with the old default tile list gains the new tile.
         let old: Config = toml::from_str("home_tiles = [\"media\", \"clipboard\", \"tools\", \"weather\", \"apps\"]").unwrap();
         assert!(old.upgrade().home_tiles.contains(&"window".to_string()));
