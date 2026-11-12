@@ -84,3 +84,53 @@ jobs:
           name: gnome-session-${{ matrix.os }}
           path: gnome-harness-artifacts
           if-no-files-found: warn
+
+  linux-app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 1
+      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci/tidemark-config
+      XDG_DATA_HOME: ${{ github.workspace }}/.ci/tidemark-data
+      XDG_CACHE_HOME: ${{ github.workspace }}/.ci/tidemark-cache
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/.ci/tidemark-runtime
+      TIDEMARK_SMOKE_DIR: ${{ github.workspace }}/.ci/tidemark-smoke
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install native build and smoke-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb dbus desktop-file-utils
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TIDEMARK_SMOKE_DIR"
+          chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TIDEMARK_SMOKE_DIR"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: apps/linux -> target
+          cache-on-failure: true
+      - name: Check native GTK APIs
+        run: cargo check --manifest-path apps/linux/Cargo.toml --locked
+      - name: Build the Ubuntu package
+        run: bash scripts/package-linux.sh
+      - name: Run native Rust application tests
+        run: cargo test --release --manifest-path apps/linux/Cargo.toml --locked
+      - name: Install and verify the package
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          test -x /usr/bin/tidemark
+          desktop-file-validate /usr/share/applications/io.github.treyzar.Tidemark.desktop
+          dpkg-query -W tidemark
+      - name: Exercise GTK startup with isolated application data
+        run: timeout 45s xvfb-run -a dbus-run-session -- env GSK_RENDERER=cairo G_DEBUG=fatal-criticals /usr/bin/tidemark --smoke-test
+      - name: Verify package removal
+        run: sudo apt-get remove -y tidemark
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tidemark-ubuntu-preview
+          path: dist/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: tidemark-ui-smoke
+          path: .ci/tidemark-smoke/*.png
+          if-no-files-found: warn

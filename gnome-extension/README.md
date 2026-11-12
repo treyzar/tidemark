@@ -170,7 +170,7 @@ CI=true TIDEMARK_HARNESS_ARTIFACT_DIR="$PWD/gnome-harness-artifacts"   bash gnom
 | Island | Mutter frame is top-centred below the panel; above, sticky, skip-taskbar |
 | Place | unknown role → `InvalidArgs` |
 | Focus | the victim is activated through the oracle, as a user click would (a new window does not take focus from the island without input); `FocusChanged` for the victim with serde keys, `(iiii)` rect and the victim's real PID; `GetFocus` agrees |
-| Window actions | `set_above`, `set_opacity` (and the floor), `tile_left` (Mutter frame = left half of the work area), `toggle_maximize` + `MaximizedTopChanged`, minimize/activate; actions on the island refused |
+| Window actions | `set_above`, `set_opacity` (and the floor), `tile_left` (Mutter frame = left half of the work area, and `MaximizedTopChanged(true)` because it covers the strip), `toggle_maximize` both ways in Mutter, minimize → `MaximizedTopChanged(false)` and activate → `(true)`; actions on the island refused |
 | Clipboard | the victim (another app, focused) offers content: text + password hint → `([], true)` and unreadable; 64 MiB + 1 → refused by the bounded read; 1 MiB → read intact; the adapter's own `SetClipboard` round trip through `Meta.Selection`; Screenshot → `Unsupported`/`screenshot` |
 | Shortcuts | defaults grabbed, `<Alt>space` reported taken |
 | Crash | the victim is dimmed to 179, then the fixture exits with status 3 |

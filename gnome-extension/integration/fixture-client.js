@@ -39,6 +39,9 @@ const phase = GLib.file_test(PHASE1_STATE, GLib.FileTest.EXISTS) ? 2 : 1;
 const bus = Gio.DBus.session;
 const lines = [];
 const loop = new GLib.MainLoop(null, false);
+// Set before loop.quit(); the process exits from the top level after
+// loop.run() returns (System.exit inside an async job did not end gjs in CI).
+let exitCode = null;
 
 class Skip extends Error {}
 
@@ -187,19 +190,26 @@ function openWindow(title, width, height, decorated) {
     return win;
 }
 
+/**
+ * Gives the victim keyboard focus the way a user click would, once Mutter has
+ * mapped and stacked it (activating earlier hits Mutter's stack_position
+ * assertion on 46 and does nothing). Retries until Mutter reports the focus.
+ */
 async function activateVictim() {
-    for (let i = 0; i < 50; i++) {
-        const done = await shellEval(`(() => {
-            const w = global.get_window_actors().map(a => a.meta_window).find(w => w.get_title() === 'tidemark-victim');
-            if (!w) return false;
-            Main.activateWindow(w);
-            return true;
+    for (let i = 0; i < 75; i++) {
+        const state = await shellEval(`(() => {
+            const a = global.get_window_actors().find(a => a.meta_window.get_title() === 'tidemark-victim');
+            if (!a || !a.mapped || a.meta_window.is_hidden()) return 'waiting';
+            const w = a.meta_window;
+            if (global.display.focus_window === w) return 'focused';
+            Main.activateWindow(w, global.get_current_time());
+            return 'activated';
         })()`);
-        if (done)
+        if (state === 'focused')
             return;
         await sleep(200);
     }
-    throw new Error('victim window never appeared in Mutter');
+    throw new Error('victim never got focus in Mutter');
 }
 
 async function victimCall(method, signature, args) {
@@ -341,7 +351,8 @@ async function phase1() {
             const e = await callError('WindowAction', '(tsv)', [victimId, 'set_opacity', new GLib.Variant('y', 10)], '(a{sv})');
             assert(e?.name === `${C.ERROR_PREFIX}.InvalidArgs`, JSON.stringify(e));
         });
-        await check('tile_left gives the left half of the work area', async () => {
+        await check('tile_left gives the left half of the work area and covers the island strip', async () => {
+            const from = signals.length;
             await act('tile_left', new GLib.Variant('b', false));
             await sleep(800);
             const d = await describeByTitle('tidemark-victim');
@@ -349,21 +360,27 @@ async function phase1() {
             const ok = Math.abs(d.x - wa.x) <= 1 && Math.abs(d.y - wa.y) <= 1 &&
                 Math.abs(d.w - Math.floor(wa.width / 2)) <= 2 && Math.abs(d.h - wa.height) <= 2;
             assert(ok, `frame ${d.x},${d.y} ${d.w}x${d.h}, work area ${JSON.stringify(wa)}`);
-        });
-        await check('toggle_maximize and MaximizedTopChanged', async () => {
-            const from = signals.length;
-            const s = await act('toggle_maximize', new GLib.Variant('b', false));
-            assert(s.maximized === true, 'maximized');
+            // The left half reaches the top of the work area across its centre.
             await waitSignal('MaximizedTopChanged', a => a[0] === true, 3000, from);
-            const s2 = await act('toggle_maximize', new GLib.Variant('b', false));
-            assert(s2.maximized === false, 'restored');
         });
-        await check('minimize and activate', async () => {
+        await check('toggle_maximize is reported by Mutter both ways', async () => {
+            const s = await act('toggle_maximize', new GLib.Variant('b', false));
+            await sleep(500);
+            assert(s.maximized === true && (await describeByTitle('tidemark-victim')).maximized === true, 'maximized');
+            const s2 = await act('toggle_maximize', new GLib.Variant('b', false));
+            await sleep(500);
+            assert(s2.maximized === false && (await describeByTitle('tidemark-victim')).maximized === false, 'restored');
+        });
+        await check('minimize uncovers the strip, activate covers it again', async () => {
+            let from = signals.length;
             const s = await act('minimize', new GLib.Variant('b', false));
             assert(s.minimized === true, 'minimized');
+            await waitSignal('MaximizedTopChanged', a => a[0] === false, 3000, from);
+            from = signals.length;
             await act('activate', new GLib.Variant('b', false));
             await sleep(500);
             assert((await describeByTitle('tidemark-victim')).minimized === false, 'still minimized');
+            await waitSignal('MaximizedTopChanged', a => a[0] === true, 3000, from);
         });
         await check('actions on Tidemark\'s own island are refused', async () => {
             const island = await describeByTitle(C.ISLAND_TITLE);
@@ -428,7 +445,8 @@ async function phase1() {
         GLib.file_set_contents(PHASE1_STATE, JSON.stringify({ victimId, pid: ownPid }));
     }
     record('INFO', false, 'phase 1 exiting with status 3 to simulate a crash', '');
-    System.exit(3);
+    exitCode = 3;
+    loop.quit();
 }
 
 // ---- phase 2 ------------------------------------------------------------------------
@@ -460,3 +478,5 @@ async function phase2() {
     GLib.file_set_contents(`${OUT}/done`, 'aborted\n');
 });
 loop.run();
+if (exitCode !== null)
+    System.exit(exitCode);

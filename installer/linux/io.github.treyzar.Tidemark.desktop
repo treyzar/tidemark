@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Tidemark
+Comment=Music, clipboard, notes and desktop tools
+Comment[ru]=Музыка, буфер обмена, заметки и инструменты рабочего стола
+Exec=tidemark
+Icon=io.github.treyzar.Tidemark
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+DBusActivatable=false
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Settings
+Name[ru]=Настройки
+Exec=tidemark --settings
