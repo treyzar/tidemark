@@ -34,7 +34,7 @@ export class ShellService {
         Object.defineProperty(handler, 'Capabilities', { get: () => this._adapter.capabilities() });
         Object.defineProperty(handler, 'ClientState', { get: () => this._adapter.state });
         Object.defineProperty(handler, 'PrimaryMonitor', { get: () => this._adapter.primaryMonitor });
-        for (const method of ['RequestLaunch', 'RequestHandover', 'Hello', 'Place', 'GetFocus', 'WindowAction', 'GetClipboard',
+        for (const method of ['RequestLaunch', 'RequestHandover', 'Hello', 'Place', 'GetFocus', 'WindowAction', 'GetClipboard', 'GetClipboardBounded',
             'SetClipboard', 'Screenshot', 'SetCaptureHidden', 'BindShortcuts'])
             handler[`${method}Async`] = (params, invocation) => this._dispatch(method, params, invocation);
         this._impl = Gio.DBusExportedObject.wrapJSObject(this._xml, handler);
@@ -132,6 +132,8 @@ export class ShellService {
             return new GLib.Variant('(a{sv})', [toDict(a.windowAction(p[0], p[1], p[2]), C.WINDOW_STATE_FIELDS)]);
         case 'GetClipboard':
             return new GLib.Variant('(ay)', [await a.getClipboard(p[0])]);
+        case 'GetClipboardBounded':
+            return new GLib.Variant('(ay)', [await a.getClipboard(p[0], p[1])]);
         case 'SetClipboard':
             a.setClipboard(p[0], p[1]);
             return null;

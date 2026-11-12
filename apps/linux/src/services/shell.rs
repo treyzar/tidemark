@@ -139,10 +139,21 @@ pub enum Command {
 }
 
 #[derive(Clone, Default)]
-pub struct Service(Option<SyncSender<Command>>);
+pub struct Service {
+    tx: Option<SyncSender<Command>>,
+    capture_policy: state::CapturePolicy,
+}
 impl Service {
+    /// Publishes the privacy switch immediately; Island's normal sync path
+    /// still owns the queued notification/cache and retries queue pressure.
+    pub fn set_clipboard_capture(&self, enabled: bool) {
+        self.capture_policy.publish(enabled);
+    }
     pub fn send(&self, command: Command) -> bool {
-        self.0
+        if let Command::CaptureClipboard(enabled) = &command {
+            self.set_clipboard_capture(*enabled);
+        }
+        self.tx
             .as_ref()
             .is_some_and(|tx| tx.try_send(command).is_ok())
     }
@@ -151,10 +162,12 @@ impl Service {
 pub fn spawn(
     events: Sender<Event>,
     mut launcher_enabled: bool,
-    mut clipboard_enabled: bool,
+    clipboard_enabled: bool,
 ) -> Service {
     let (tx, rx) = mpsc::sync_channel(16);
     let worker_events = events.clone();
+    let capture_policy = state::CapturePolicy::new(clipboard_enabled);
+    let worker_policy = capture_policy.clone();
     let result = std::thread::Builder::new()
         .name("tidemark-shell".into())
         .spawn(move || {
@@ -166,7 +179,7 @@ pub fn spawn(
                         &events,
                         &rx,
                         &mut launcher_enabled,
-                        &mut clipboard_enabled,
+                        &worker_policy,
                         &mut generation,
                     )
                     .await
@@ -185,7 +198,10 @@ pub fn spawn(
             });
         });
     match result {
-        Ok(_) => Service(Some(tx)),
+        Ok(_) => Service {
+            tx: Some(tx),
+            capture_policy,
+        },
         Err(error) => {
             let _ = events.send(Event::Disconnected(format!(
                 "Не удалось запустить мост GNOME: {error}"
@@ -199,7 +215,7 @@ async fn session(
     events: &Sender<Event>,
     commands: &Receiver<Command>,
     launcher_enabled: &mut bool,
-    clipboard_enabled: &mut bool,
+    capture_policy: &state::CapturePolicy,
     generation: &mut u64,
 ) -> zbus::Result<()> {
     let connect = async {
@@ -245,7 +261,8 @@ async fn session(
     *generation = generation.wrapping_add(1);
     let mut authenticated = false;
     let mut clipboard = state::ClipboardGuard::default();
-    clipboard.enable(*clipboard_enabled);
+    let mut observed_policy = capture_policy.snapshot();
+    clipboard.enable(observed_policy.enabled());
     let (read_tx, read_rx) = mpsc::sync_channel::<(ReadKey, Result<String, ShellError>)>(1);
     let mut reading = false;
     let mut attempted: Option<ReadKey> = None;
@@ -281,6 +298,12 @@ async fn session(
             )
             .await
         };
+        sync_capture_policy(
+            capture_policy,
+            &mut observed_policy,
+            &mut clipboard,
+            &mut attempted,
+        );
         match wake {
             Wake::Owner(Some(Ok(message))) => {
                 let (name, _old, next): (String, String, String) = message.body().deserialize()?;
@@ -331,6 +354,12 @@ async fn session(
         }
         let mut drained = 0;
         while let Some(message) = future::poll_once(signals.next()).await {
+            sync_capture_policy(
+                capture_policy,
+                &mut observed_policy,
+                &mut clipboard,
+                &mut attempted,
+            );
             match message {
                 Some(Ok(message)) => dispatch_signal(
                     &message,
@@ -362,9 +391,19 @@ async fn session(
                 None => return Ok(()),
             }
         }
+        sync_capture_policy(
+            capture_policy,
+            &mut observed_policy,
+            &mut clipboard,
+            &mut attempted,
+        );
         if let Ok((key, result)) = read_rx.try_recv() {
             reading = false;
-            if clipboard.accepts(&key) && key.peer.matches(&owner, *generation) && authenticated {
+            if capture_policy.permits(observed_policy)
+                && clipboard.accepts(&key)
+                && key.peer.matches(&owner, *generation)
+                && authenticated
+            {
                 match result {
                     Ok(text) => {
                         let _ = events.send(Event::ClipboardText(key, text));
@@ -375,7 +414,8 @@ async fn session(
                 }
             }
         }
-        if !reading && authenticated && !handover_pending {
+        if !reading && authenticated && !handover_pending && capture_policy.permits(observed_policy)
+        {
             if let Some(key) = clipboard
                 .current()
                 .filter(|key| attempted.as_ref() != Some(key))
@@ -383,10 +423,17 @@ async fn session(
                 let tx = read_tx.clone();
                 let conn = connection.clone();
                 let task_key = key.clone();
+                let policy = capture_policy.clone();
+                let expected_policy = observed_policy;
                 match std::thread::Builder::new()
                     .name("tidemark-clipboard-read".into())
                     .spawn(move || {
-                        let result = async_io::block_on(read_clipboard(&conn, &task_key));
+                        let result = async_io::block_on(read_clipboard(
+                            &conn,
+                            &task_key,
+                            &policy,
+                            expected_policy,
+                        ));
                         let _ = tx.try_send((task_key, result));
                     }) {
                     Ok(_) => {
@@ -414,9 +461,15 @@ async fn session(
                 }
             }
             match commands.try_recv() {
-                Ok(Command::CaptureClipboard(enabled)) => {
-                    *clipboard_enabled = enabled;
-                    clipboard.enable(enabled);
+                Ok(Command::CaptureClipboard(_)) => {
+                    // The queue is only a wake-up. An older queued toggle must
+                    // never override a more recent privacy policy publication.
+                    sync_capture_policy(
+                        capture_policy,
+                        &mut observed_policy,
+                        &mut clipboard,
+                        &mut attempted,
+                    );
                 }
                 Ok(Command::Window {
                     request,
@@ -512,6 +565,21 @@ async fn session(
             }
             state_check = std::time::Instant::now();
         }
+    }
+}
+
+fn sync_capture_policy(
+    policy: &state::CapturePolicy,
+    observed: &mut state::CaptureState,
+    clipboard: &mut state::ClipboardGuard,
+    attempted: &mut Option<ReadKey>,
+) {
+    let current = policy.snapshot();
+    if current != *observed {
+        clipboard.invalidate();
+        clipboard.enable(current.enabled());
+        *observed = current;
+        *attempted = None;
     }
 }
 
@@ -669,19 +737,51 @@ pub fn decode_window_state(mut dict: HashMap<String, OwnedValue>) -> Result<Wind
 async fn read_clipboard(
     connection: &zbus::Connection,
     key: &ReadKey,
+    policy: &state::CapturePolicy,
+    expected_policy: state::CaptureState,
 ) -> Result<String, ShellError> {
+    if !policy.permits(expected_policy) {
+        return Err(ShellError::Failed(
+            "Фоновая история буфера выключена".into(),
+        ));
+    }
     let proxy = zbus::Proxy::new(connection, key.peer.owner.as_str(), OBJECT_PATH, INTERFACE)
         .await
         .map_err(map_error)?;
+    if !policy.permits(expected_policy) {
+        return Err(ShellError::Failed(
+            "Фоновая история буфера выключена".into(),
+        ));
+    }
     let message = proxy
-        .call_method("GetClipboard", &(key.mime.as_str(),))
+        .call_method(
+            "GetClipboardBounded",
+            &(key.mime.as_str(), state::MAX_TEXT_BYTES as u32),
+        )
         .await
-        .map_err(map_error)?;
+        .map_err(map_clipboard_read_error)?;
+    if !policy.permits(expected_policy) {
+        return Err(ShellError::Failed(
+            "Фоновая история буфера выключена".into(),
+        ));
+    }
     let body = message.body();
     let (bytes,): (&[u8],) = body
         .deserialize()
         .map_err(|error| ShellError::Failed(error.to_string()))?;
     state::text(bytes).map_err(ShellError::Failed)
+}
+fn map_clipboard_read_error(error: zbus::Error) -> ShellError {
+    match &error {
+        zbus::Error::MethodError(name, _, _)
+            if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
+        {
+            // Automatic history never falls back to an unbounded compositor
+            // read when an older extension lacks the additive bounded method.
+            ShellError::Unsupported(Capability::ClipboardRead)
+        }
+        _ => map_error(error),
+    }
 }
 async fn write_clipboard(
     connection: &zbus::Connection,
@@ -915,6 +1015,16 @@ fn decode_signal(message: &zbus::Message) -> Result<Option<Event>, String> {
     Ok(Some(event))
 }
 
+/// The island is placed on the primary monitor. Unknown mapping disables
+/// automatic hiding rather than reacting to a secondary monitor's fullscreen.
+pub fn hide_for_fullscreen(
+    enabled: bool,
+    primary: Option<u32>,
+    fullscreen: &std::collections::HashSet<u32>,
+) -> bool {
+    enabled && primary.is_some_and(|monitor| fullscreen.contains(&monitor))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,7 +1051,7 @@ mod tests {
     fn window_action_variants_and_confirmed_dict_keep_exact_types() {
         let (name, arg) = action_wire(WindowAction::SetAbove(true)).unwrap();
         assert_eq!(name, "set_above");
-        assert_eq!(bool::try_from(arg).unwrap(), true);
+        assert!(bool::try_from(arg).unwrap());
         let (name, arg) = action_wire(WindowAction::SetOpacity(128)).unwrap();
         assert_eq!(name, "set_opacity");
         assert_eq!(u8::try_from(arg).unwrap(), 128);
@@ -1009,13 +1119,81 @@ mod tests {
     #[test]
     fn command_queue_reports_backpressure_instead_of_claiming_placement() {
         let (tx, _rx) = mpsc::sync_channel(1);
-        let service = Service(Some(tx));
+        let service = Service {
+            tx: Some(tx),
+            capture_policy: state::CapturePolicy::new(true),
+        };
         assert!(service.send(Command::Place(Rect::default())));
         assert!(!service.send(Command::Place(Rect {
             w: 560,
             ..Rect::default()
         })));
         assert!(!Service::default().send(Command::Handover));
+    }
+    #[test]
+    fn full_command_queue_cannot_lose_capture_disable_or_restore_an_old_enable() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let policy = state::CapturePolicy::new(true);
+        let service = Service {
+            tx: Some(tx),
+            capture_policy: policy.clone(),
+        };
+        let mut observed = policy.snapshot();
+        let mut guard = state::ClipboardGuard::default();
+        guard.enable(true);
+        let peer = Peer {
+            owner: ":1.2".into(),
+            generation: 1,
+        };
+        let key = guard
+            .offer(
+                &peer,
+                &ClipboardOffer {
+                    mimes: vec!["text/plain".into()],
+                    sensitive: false,
+                },
+            )
+            .unwrap();
+        let mut attempted = Some(key.clone());
+        // This queued enable predates the disable and must never be authoritative.
+        assert!(service.send(Command::CaptureClipboard(true)));
+        assert!(!service.send(Command::CaptureClipboard(false)));
+        assert!(!policy.permits(observed));
+        assert!(matches!(rx.try_recv(), Ok(Command::CaptureClipboard(true))));
+        sync_capture_policy(&policy, &mut observed, &mut guard, &mut attempted);
+        assert!(!observed.enabled());
+        assert!(!guard.accepts(&key));
+        assert!(attempted.is_none());
+        assert!(guard
+            .offer(
+                &peer,
+                &ClipboardOffer {
+                    mimes: vec!["text/plain".into()],
+                    sensitive: false,
+                }
+            )
+            .is_none());
+        // Settings publishes immediately without touching Island's queued cache.
+        service.set_clipboard_capture(true);
+        service.set_clipboard_capture(false);
+        assert!(!policy.snapshot().enabled());
+    }
+    #[test]
+    fn older_adapter_without_bounded_read_reports_unsupported() {
+        let call = zbus::Message::method_call(OBJECT_PATH, "GetClipboardBounded")
+            .unwrap()
+            .build(&("text/plain", state::MAX_TEXT_BYTES as u32))
+            .unwrap();
+        let error = zbus::Error::from(
+            zbus::Message::error(&call.header(), "org.freedesktop.DBus.Error.UnknownMethod")
+                .unwrap()
+                .build(&("no such method",))
+                .unwrap(),
+        );
+        assert!(matches!(
+            map_clipboard_read_error(error),
+            ShellError::Unsupported(Capability::ClipboardRead)
+        ));
     }
     #[test]
     fn empty_focus_is_none_and_complete_focus_preserves_types() {
@@ -1121,14 +1299,4 @@ mod tests {
             Some(Event::Shortcut(ShortcutId::ToggleTheme))
         ));
     }
-}
-
-/// The island is placed on the primary monitor. Unknown mapping disables
-/// automatic hiding rather than reacting to a secondary monitor's fullscreen.
-pub fn hide_for_fullscreen(
-    enabled: bool,
-    primary: Option<u32>,
-    fullscreen: &std::collections::HashSet<u32>,
-) -> bool {
-    enabled && primary.is_some_and(|monitor| fullscreen.contains(&monitor))
 }

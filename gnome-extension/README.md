@@ -50,6 +50,7 @@ The installed Rust client has a separate headless acceptance path: after install
   | `GetFocus` | `focus_tracking` |
   | `WindowAction` | `window_actions` |
   | `GetClipboard` | `clipboard_read` |
+  | `GetClipboardBounded` | `clipboard_read` |
   | `SetClipboard` | `clipboard_write` |
   | `Screenshot` | `screenshot` |
   | `SetCaptureHidden` | `capture_hiding` |
@@ -74,6 +75,7 @@ The installed Rust client has a separate headless acceptance path: after install
   - `ClipboardChanged(mimes, sensitive)` carries MIME types only.
   - Content marked with `x-kde-passwordManagerHint` is announced as `([], true)` and `GetClipboard` refuses to read it.
   - Content is returned as `ay` (at most 64 MiB). File descriptors are not used in version 1.
+- **`GetClipboardBounded(mime, max_bytes)`** (additive in contract 1, same `clipboard_read` capability and authentication as `GetClipboard`): the caller's own limit, 1–64 MiB (`InvalidArgs` otherwise). The transfer stops at `max_bytes + 1`, and longer content is `Failed`. Use it for background text history so large copies never cross the bus. `GetClipboard(mime)` is unchanged.
 - **Bounded reads:** reads go through `Meta.Selection.transfer_async` with `size` = 64 MiB + 1, which is a hard byte limit in Mutter 46's `core/meta-selection.c`, and are cancelled after 5 s. Larger content is refused, so unbounded provider data is never buffered in gnome-shell.
 - **No stale reads:** every owner change bumps a clipboard generation, and a read during which the owner changed (even A → B → A) is discarded.
 - **Keyboard:** `LayoutChanged("RU")` and `CapsLock(b)` are sent on change only.

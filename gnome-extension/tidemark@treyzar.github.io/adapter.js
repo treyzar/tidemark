@@ -584,9 +584,17 @@ export class Adapter {
         this._sink.emit('ClipboardChanged', [sensitive ? [] : mimes, sensitive]);
     }
 
-    async getClipboard(mime) {
+    /**
+     * GetClipboard(mime) reads up to 64 MiB; GetClipboardBounded(mime,
+     * max_bytes) passes the caller's smaller limit. Either way the platform
+     * transfer is hard-bounded at maxBytes + 1, and the secret, offered-type,
+     * owner-generation and timeout guards are the same.
+     */
+    async getClipboard(mime, maxBytes = C.MAX_CLIPBOARD_BYTES) {
         if (!C.validMime(mime))
             throw invalid('bad MIME type');
+        if (!C.validClipboardLimit(maxBytes))
+            throw invalid(`max_bytes must be 1..${C.MAX_CLIPBOARD_BYTES}`);
         const generation = this._clipboardGeneration;
         const mimes = this._p.clipboardMimes();
         if (C.isSensitive(mimes))
@@ -595,7 +603,7 @@ export class Adapter {
             throw failed('В буфере нет данных этого типа');
         let bytes;
         try {
-            bytes = await this._p.readClipboard(mime, C.MAX_CLIPBOARD_BYTES);
+            bytes = await this._p.readClipboard(mime, maxBytes);
         } catch (e) {
             throw failed(e?.message === 'too_large' ? 'Слишком большие данные в буфере' : 'Не удалось прочитать буфер обмена');
         }
@@ -603,8 +611,10 @@ export class Adapter {
         // content) voids it: the bytes may come from a different, secret owner.
         if (generation !== this._clipboardGeneration)
             throw failed('Буфер обмена изменился во время чтения');
-        if (!(bytes instanceof Uint8Array) || bytes.length > C.MAX_CLIPBOARD_BYTES)
+        if (!(bytes instanceof Uint8Array))
             throw failed('Не удалось прочитать буфер обмена');
+        if (bytes.length > maxBytes)
+            throw failed('Слишком большие данные в буфере');
         return bytes;
     }
 

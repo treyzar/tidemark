@@ -17,6 +17,10 @@ mod dock_state_tests;
 #[cfg(test)]
 #[path = "services/home_online.rs"]
 mod home_online_tests;
+#[cfg(test)]
+#[path = "services/shelf.rs"]
+#[allow(dead_code)]
+mod shelf_state_tests;
 #[cfg(all(test, not(target_os = "linux")))]
 #[allow(dead_code)]
 #[path = "services/shell.rs"]

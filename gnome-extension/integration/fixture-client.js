@@ -317,6 +317,8 @@ async function phase1() {
         assert(mimes.length === 0, `mimes leaked: ${mimes}`);
         const e = await callError('GetClipboard', '(s)', ['text/plain'], '(ay)');
         assert(e?.name === `${C.ERROR_PREFIX}.Failed`, JSON.stringify(e));
+        const bounded = await callError('GetClipboardBounded', '(su)', ['text/plain', 1024], '(ay)');
+        assert(bounded?.name === `${C.ERROR_PREFIX}.Failed`, `bounded: ${JSON.stringify(bounded)}`);
         return `sensitive ${sensitive}`;
     });
 
@@ -336,6 +338,23 @@ async function phase1() {
         await waitSignal('ClipboardChanged', a => a[0].includes('text/plain') && a[1] === false, 5000, from);
         const [bytes] = await call('GetClipboard', '(s)', ['text/plain'], '(ay)');
         assert(bytes.length === 1024 * 1024 && bytes[0] === 97, `got ${bytes.length} bytes`);
+    });
+
+    await check('GetClipboardBounded: caller limit refuses larger content, keeps smaller, rejects bad limits', async () => {
+        const from = signals.length;
+        await victimCall('OfferBytes', '(sub)', ['text/plain', 4096, false]);
+        await waitSignal('ClipboardChanged', a => a[0].includes('text/plain') && a[1] === false, 5000, from);
+        const small = await callError('GetClipboardBounded', '(su)', ['text/plain', 1024], '(ay)');
+        assert(small?.name === `${C.ERROR_PREFIX}.Failed`, `limit 1024: ${JSON.stringify(small)}`);
+        const [exact] = await call('GetClipboardBounded', '(su)', ['text/plain', 4096], '(ay)');
+        assert(exact.length === 4096 && exact[0] === 97, `limit 4096 got ${exact.length}`);
+        const [roomy] = await call('GetClipboardBounded', '(su)', ['text/plain', 65536], '(ay)');
+        assert(roomy.length === 4096, `limit 65536 got ${roomy.length}`);
+        for (const bad of [0, C.MAX_CLIPBOARD_BYTES + 1]) {
+            const e = await callError('GetClipboardBounded', '(su)', ['text/plain', bad], '(ay)');
+            assert(e?.name === `${C.ERROR_PREFIX}.InvalidArgs`, `limit ${bad}: ${JSON.stringify(e)}`);
+        }
+        return small.message;
     });
 
     if (victimId !== null) {

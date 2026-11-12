@@ -208,3 +208,20 @@ test('version-sensitive Mutter calls are feature-detected', () => {
     assert.match(platform, /typeof w\.hide_from_window_list === 'function'/);
     assert.match(platform, /typeof w\.get_maximized === 'function'/);
 });
+
+test('GetClipboardBounded is additive to contract 1', () => {
+    const methods = xmlMembers('method');
+    assert.deepEqual(methods.GetClipboard.map(a => a.type), ['s', 'ay'], 'GetClipboard unchanged');
+    assert.deepEqual(methods.GetClipboardBounded.map(a => [a.name, a.type, a.dir]),
+        [['mime', 's', 'in'], ['max_bytes', 'u', 'in'], ['bytes', 'ay', 'out']]);
+    assert.equal(C.CONTRACT_VERSION, 1);
+    assert.equal(C.METHOD_CAPABILITY.GetClipboardBounded, 'clipboard_read');
+    assert.ok(C.validClipboardLimit(1) && C.validClipboardLimit(C.MAX_CLIPBOARD_BYTES));
+    for (const bad of [0, -1, 2.5, C.MAX_CLIPBOARD_BYTES + 1, '5', null])
+        assert.ok(!C.validClipboardLimit(bad), String(bad));
+    const service = readFileSync(new URL('dbusService.js', EXT), 'utf8');
+    assert.match(service, /'GetClipboardBounded'/);
+    assert.match(service, /case 'GetClipboardBounded':\s*\n\s*return new GLib\.Variant\('\(ay\)', \[await a\.getClipboard\(p\[0\], p\[1\]\)\]\);/);
+    // Not in OPEN_METHODS: authenticated like every privileged method.
+    assert.doesNotMatch(service.match(/const OPEN_METHODS = new Set\(\[([^\]]*)\]\)/)[1], /GetClipboardBounded/);
+});

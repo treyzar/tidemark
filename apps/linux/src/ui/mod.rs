@@ -9,6 +9,7 @@ pub mod island;
 pub mod launcher;
 pub mod notes;
 pub mod settings;
+pub mod shelf;
 pub mod text;
 
 use std::cell::RefCell;

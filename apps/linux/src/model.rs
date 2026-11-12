@@ -9,9 +9,10 @@ use tidemark_core::shell::Capability;
 
 /// Tab id, Russian label and icon name. The icon names come from the
 /// standard Adwaita icon theme shipped with Ubuntu 24.04.
-pub const TABS: [(&str, &str, &str); 5] = [
+pub const TABS: [(&str, &str, &str); 6] = [
     ("home", "Главная", "go-home-symbolic"),
     ("clipboard", "Буфер", "edit-paste-symbolic"),
+    ("shelf", "Файлы", "folder-open-symbolic"),
     ("notes", "Заметки", "appointment-new-symbolic"),
     ("text", "Текст", "text-x-generic-symbolic"),
     ("control", "Управление", "preferences-system-symbolic"),

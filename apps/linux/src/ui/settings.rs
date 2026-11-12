@@ -244,12 +244,7 @@ fn behaviour_page(shared: &Shared) -> adw::PreferencesPage {
         row.connect_active_notify(move |row| {
             set(&mut shared.config.borrow_mut(), row.is_active());
             if clipboard_setting {
-                shared
-                    .shell
-                    .borrow()
-                    .send(crate::services::shell::Command::CaptureClipboard(
-                        row.is_active(),
-                    ));
+                shared.shell.borrow().set_clipboard_capture(row.is_active());
             }
             shared.save_config();
         });

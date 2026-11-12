@@ -641,3 +641,37 @@ test('setting a window back to its original opacity forgets it', () => {
     a.onWindowShown(app);
     assert.equal(app.opacity, 100, 'no longer managed');
 });
+
+test('GetClipboardBounded: caller limit is the hard platform bound', async () => {
+    const { p, a, sink } = setup();
+    p.mimes = ['text/plain'];
+    p.clipboard.set('text/plain', new Uint8Array(4096).fill(97));
+    a.onClipboardChanged();
+    sink.take();
+    // Larger than the requested small limit: refused, and the platform was asked for that limit.
+    await assert.rejects(a.getClipboard('text/plain', 1024), e => e.kind === 'failed' && /большие/.test(e.message));
+    assert.equal(p.readLimits.at(-1), 1024);
+    // Within the limit (including exactly at it): bytes round-trip.
+    assert.equal((await a.getClipboard('text/plain', 4096)).length, 4096);
+    assert.equal((await a.getClipboard('text/plain', 8192)).length, 4096);
+    // Invalid limits never reach the platform.
+    const reads = p.readLimits.length;
+    for (const bad of [0, -1, 1.5, C.MAX_CLIPBOARD_BYTES + 1, NaN, '1024'])
+        await assert.rejects(a.getClipboard('text/plain', bad), err('invalid_args'), String(bad));
+    assert.equal(p.readLimits.length, reads);
+    assert.equal((await a.getClipboard('text/plain', C.MAX_CLIPBOARD_BYTES)).length, 4096);
+});
+
+test('GetClipboardBounded keeps the secret and owner-change guards', async () => {
+    const { p, a } = setup();
+    p.mimes = ['text/plain', 'x-kde-passwordManagerHint'];
+    p.clipboard.set('text/plain', new Uint8Array([1]));
+    a.onClipboardChanged();
+    await assert.rejects(a.getClipboard('text/plain', 16), err('failed'));
+    p.mimes = ['text/plain'];
+    a.onClipboardChanged();
+    p.duringRead = () => a.onClipboardChanged();
+    await assert.rejects(a.getClipboard('text/plain', 16), err('failed'));
+    p.duringRead = null;
+    await assert.rejects(a.getClipboard('text/html', 16), err('failed'));
+});

@@ -1685,6 +1685,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "serde_json",
  "tidemark-agent",
  "tidemark-artwork",
  "tidemark-capture",

@@ -24,12 +24,13 @@ const SETTINGS_TITLE: &str = "Tidemark — настройки";
 const EXPANDED_HEIGHT: i32 = 620;
 
 pub struct Island {
-    pub window: adw::ApplicationWindow,
+    pub window: gtk::ApplicationWindow,
     pub home: HomeView,
     pub notes: NotesView,
     pub control: ControlView,
     pub clipboard: Rc<ClipboardView>,
     pub text: TextView,
+    pub shelf: crate::ui::shelf::ShelfView,
     pub stack: gtk::Stack,
     pub agent: crate::ui::agent::AgentView,
     agent_previous: Cell<Option<(bool, bool)>>,
@@ -70,7 +71,10 @@ pub struct Island {
 impl Island {
     pub fn build(app: &adw::Application, shared: Shared) -> Rc<Self> {
         let config = shared.config.borrow();
-        let window = adw::ApplicationWindow::builder()
+        // Adwaita 1.5's breakpoint bin allocates against the child's vertical
+        // request at width=-1. A fixed-size, wrapped overlay needs GTK's
+        // regular height-for-width allocation; settings still use Adwaita.
+        let window = gtk::ApplicationWindow::builder()
             .application(app)
             .title(ISLAND_TITLE)
             .decorated(false)
@@ -128,6 +132,7 @@ impl Island {
         let clipboard = ClipboardView::build(shared.clone());
         let notes = NotesView::build(shared.clone());
         let text = TextView::build(shared.clone());
+        let shelf = crate::ui::shelf::ShelfView::build(shared.clone());
         let control = ControlView::build(shared.clone());
 
         let stack = gtk::Stack::new();
@@ -140,7 +145,9 @@ impl Island {
                 "clipboard" => clipboard.root.clone().upcast(),
                 "notes" => notes.root.clone().upcast(),
                 "text" => text.root.clone().upcast(),
-                _ => control.root.clone().upcast(),
+                "shelf" => shelf.root.clone().upcast(),
+                "control" => control.root.clone().upcast(),
+                _ => unreachable!("unknown island tab"),
             };
             let scrolled = crate::ui::scroll(&page);
             // Icons retain the page title as the tooltip/accessibility label
@@ -187,10 +194,9 @@ impl Island {
         revealer.set_child(Some(&expanded));
         root.append(&revealer);
 
-        // GtkWindowHandle's bin layout does not propagate height-for-width
-        // requests. Wrapped agent cards can then allocate at their narrow
-        // natural height even though the actual window is wide enough.
-        window.set_content(Some(&root));
+        let handle = gtk::WindowHandle::new();
+        handle.set_child(Some(&root));
+        window.set_child(Some(&handle));
         // Adwaita/Wayland can initially allocate its natural 360×200 size
         // despite builder defaults. Apply the same explicit compact request
         // used by collapse(), before the first presentation.
@@ -213,6 +219,7 @@ impl Island {
             control,
             clipboard,
             text,
+            shelf,
             stack,
             agent,
             agent_previous: Cell::new(None),
@@ -256,6 +263,16 @@ impl Island {
     }
 
     fn wire(&self) {
+        let shelf_drop = self.shelf.drop_target();
+        let weak = self.weak();
+        shelf_drop.connect_enter(move |_, _, _| {
+            if let Some(island) = weak.upgrade() {
+                island.expand();
+                island.show_tab("shelf");
+            }
+            gtk::gdk::DragAction::COPY
+        });
+        self.window.add_controller(shelf_drop);
         let weak = self.weak();
         self.search_button.connect_clicked(move |_| {
             if let Some(island) = weak.upgrade() {

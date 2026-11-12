@@ -21,6 +21,7 @@
     InvalidArgs}. Unsupported carries exactly the capability wire name as
     message (ShellError::Unsupported): Place place_windows, GetFocus
     focus_tracking, WindowAction window_actions, GetClipboard clipboard_read,
+    GetClipboardBounded clipboard_read,
     SetClipboard clipboard_write, Screenshot screenshot, SetCaptureHidden
     capture_hiding, BindShortcuts global_shortcuts. Failed carries
     user-facing text (ShellError::Failed).
@@ -61,6 +62,14 @@
     </method>
     <method name="GetClipboard">
       <arg name="mime" type="s" direction="in"/>
+      <arg name="bytes" type="ay" direction="out"/>
+    </method>
+    <!-- Additive in contract 1: like GetClipboard, but the transfer stops at
+         max_bytes + 1 and anything longer is Failed. max_bytes must be
+         1..67108864 (InvalidArgs otherwise). -->
+    <method name="GetClipboardBounded">
+      <arg name="mime" type="s" direction="in"/>
+      <arg name="max_bytes" type="u" direction="in"/>
       <arg name="bytes" type="ay" direction="out"/>
     </method>
     <method name="SetClipboard">

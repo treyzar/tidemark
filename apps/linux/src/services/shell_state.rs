@@ -1,5 +1,46 @@
 //! Pure owner/generation and clipboard-offer guards, no desktop access.
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tidemark_core::{clip_history::MAX_TEXT_CHARS, shell::ClipboardOffer};
+
+/// A privacy policy published outside the bounded command queue. Every toggle
+/// advances the revision, including disable/enable before the worker wakes.
+#[derive(Clone, Default)]
+pub struct CapturePolicy(Arc<AtomicU64>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureState(u64);
+impl CaptureState {
+    pub fn enabled(self) -> bool {
+        self.0 & 1 != 0
+    }
+}
+impl CapturePolicy {
+    pub fn new(enabled: bool) -> Self {
+        Self(Arc::new(AtomicU64::new(u64::from(enabled))))
+    }
+    pub fn publish(&self, enabled: bool) {
+        let mut current = self.0.load(Ordering::SeqCst);
+        while (current & 1 != 0) != enabled {
+            match self.0.compare_exchange(
+                current,
+                current.wrapping_add(1),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(next) => current = next,
+            }
+        }
+    }
+    pub fn snapshot(&self) -> CaptureState {
+        CaptureState(self.0.load(Ordering::SeqCst))
+    }
+    pub fn permits(&self, state: CaptureState) -> bool {
+        state.enabled() && self.snapshot() == state
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub owner: String,
@@ -39,7 +80,7 @@ impl ClipboardGuard {
             && !offer.sensitive
             && !offer.mimes.iter().any(|m| m == "x-kde-passwordManagerHint")
         {
-            let mime = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"]
+            let mime = ["text/plain;charset=utf-8", "text/plain"]
                 .into_iter()
                 .find(|m| offer.mimes.iter().any(|offered| offered == m));
             self.current = mime.map(|mime| ReadKey {
@@ -83,6 +124,31 @@ mod tests {
             mimes: vec!["text/plain".into()],
             sensitive: false,
         }
+    }
+    #[test]
+    fn capture_policy_invalidates_disable_enable_aba_even_before_worker_wakes() {
+        let policy = CapturePolicy::new(true);
+        let original = policy.snapshot();
+        assert!(policy.permits(original));
+        policy.publish(false);
+        assert!(!policy.permits(original));
+        policy.publish(true);
+        assert!(!policy.permits(original));
+        assert!(policy.permits(policy.snapshot()));
+    }
+    #[test]
+    fn non_mime_x11_target_is_not_requested_from_the_gnome_adapter() {
+        let mut guard = ClipboardGuard::default();
+        guard.enable(true);
+        assert!(guard
+            .offer(
+                &peer(1),
+                &ClipboardOffer {
+                    mimes: vec!["UTF8_STRING".into()],
+                    sensitive: false,
+                }
+            )
+            .is_none());
     }
     #[test]
     fn same_unique_owner_new_generation_never_accepts_old_mutation() {

@@ -104,6 +104,7 @@ export const METHOD_CAPABILITY = {
     GetFocus: 'focus_tracking',
     WindowAction: 'window_actions',
     GetClipboard: 'clipboard_read',
+    GetClipboardBounded: 'clipboard_read',
     SetClipboard: 'clipboard_write',
     Screenshot: 'screenshot',
     SetCaptureHidden: 'capture_hiding',
@@ -125,6 +126,10 @@ export const SIGNALS = {
 
 export const PASSWORD_HINT_MIME = 'x-kde-passwordManagerHint';
 export const MAX_CLIPBOARD_BYTES = 64 * 1024 * 1024;
+// GetClipboardBounded(mime, max_bytes): the caller's own limit, 1..64 MiB.
+export function validClipboardLimit(maxBytes) {
+    return Number.isInteger(maxBytes) && maxBytes >= 1 && maxBytes <= MAX_CLIPBOARD_BYTES;
+}
 // Reads are bounded: Meta.Selection.transfer_async(size = MAX + 1) stops after
 // that many bytes, and the transfer is cancelled after this deadline.
 export const CLIPBOARD_READ_TIMEOUT_MS = 5000;
