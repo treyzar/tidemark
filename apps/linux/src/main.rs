@@ -7,6 +7,17 @@
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod model;
 
+#[cfg(test)]
+#[path = "services/home_online.rs"]
+mod home_online_tests;
+#[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
+#[path = "services/shell.rs"]
+mod shell_protocol_tests;
+#[cfg(test)]
+#[path = "services/online.rs"]
+mod translation_state_tests;
+
 #[cfg(target_os = "linux")]
 mod app;
 #[cfg(target_os = "linux")]

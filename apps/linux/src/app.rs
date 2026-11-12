@@ -163,9 +163,18 @@ fn ensure_ui(app: &adw::Application, state: &Rc<AppState>) {
             glib::ControlFlow::Continue
         });
     }
-    if shell::launched_by_adapter() {
-        start_shell_bridge(island);
-    }
+    let (shell_tx, shell_rx) = mpsc::channel();
+    island.attach_shell(shell::spawn(shell_tx));
+    let weak = Rc::downgrade(&island);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let Some(island) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        while let Ok(event) = shell_rx.try_recv() {
+            island.handle_shell(event);
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Island>) {
@@ -270,19 +279,4 @@ fn render_png(widget: &gtk::Widget, path: &Path) -> Result<(), String> {
     texture
         .save_to_png(path)
         .map_err(|error| format!("save {}: {error}", path.display()))
-}
-
-fn start_shell_bridge(island: Rc<Island>) {
-    // Hello is performed on a worker so the GTK loop never blocks on D-Bus.
-    // The UI currently keeps GNOME-only actions disabled until the bridge is
-    // complete; this call establishes the authenticated, unicast connection.
-    let _ = island;
-    std::thread::Builder::new()
-        .name("tidemark-shell".into())
-        .spawn(|| {
-            if let Err(error) = shell::hello() {
-                eprintln!("Tidemark shell adapter: {error}");
-            }
-        })
-        .ok();
 }

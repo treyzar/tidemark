@@ -30,6 +30,7 @@ pub struct Shared {
     pub timers: Rc<RefCell<Timer>>,
     pub music: MusicService,
     pub smoke: bool,
+    pub shell_status: Rc<RefCell<String>>,
     css: Rc<gtk::CssProvider>,
 }
 
@@ -49,6 +50,7 @@ impl Shared {
             timers,
             music,
             smoke,
+            shell_status: Rc::new(RefCell::new("GNOME: ожидание адаптера".into())),
             css: Rc::new(gtk::CssProvider::new()),
         }
     }

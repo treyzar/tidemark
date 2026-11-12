@@ -27,6 +27,8 @@ It exposes these as the D-Bus interface `org.tidemark.Shell1` (bus name `org.tid
 
 ## Contract version 1
 
+The installed Rust client has a separate headless acceptance path: after installing the CI `.deb`, run `CI=true TIDEMARK_HARNESS_APP=1 bash gnome-extension/integration/run-headless.sh`. This keeps the same private-bus/XDG guards and exercises the real GTK process, its retained Hello connection, shortcut-driven resizing and primary-monitor fullscreen signal handling. The default harness still runs the independent GJS fixture and all its compositor checks.
+
 - **Enum strings and keys:** roles, window actions, capabilities and shortcut ids use the serde `snake_case` names. `a{sv}` keys use the serde field names. `Rect` is `(iiii)` = `(x, y, w, h)` in logical pixels.
 - **Advertised capabilities (only these):** `place_windows`, `focus_tracking`, `window_actions`, `fullscreen_tracking`, `maximized_tracking`, `clipboard_read`, `clipboard_write`, `global_shortcuts`, `keyboard_layout`, `caps_lock`.
 - **Not advertised:**

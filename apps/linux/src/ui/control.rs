@@ -16,6 +16,7 @@ pub struct ControlView {
     shared: Shared,
     clock: gtk::Label,
     state: gtk::Label,
+    bridge_status: gtk::Label,
     preset: Rc<Cell<u64>>,
 }
 
@@ -103,8 +104,8 @@ impl ControlView {
         let window_card = card();
         window_card.append(&section_title("Окно и система"));
         window_card.append(&muted(
-            "Активное окно, действия с ним, полноэкранный режим и горячие клавиши \
-             доступны только через адаптер GNOME Shell. Кнопки ниже выключены осознанно.",
+            "Состояние GNOME показано ниже. Управление чужими окнами, захват экрана \
+             и поиск ещё не подключены; кнопки этих действий выключены.",
         ));
         for label in [
             "Поверх всех окон",
@@ -115,19 +116,15 @@ impl ControlView {
         ] {
             let button = text_button(label);
             button.set_sensitive(false);
-            button.set_tooltip_text(Some("Требуется подключённый адаптер GNOME Shell."));
+            button.set_tooltip_text(Some("Действие ещё не подключено в этой сборке."));
             window_card.append(&button);
         }
         root.append(&window_card);
 
         let status_card = card();
         status_card.append(&section_title("Состояние Linux-версии"));
-        status_card.append(&muted(if crate::services::shell::launched_by_adapter() {
-            "Процесс запущен расширением GNOME Shell. D-Bus-мост и привилегированные \
-             вызовы ещё не подключены в этой сборке."
-        } else {
-            "Расширение GNOME Shell не подключено. Остров работает как обычное окно."
-        }));
+        let bridge_status = muted(&shared.shell_status.borrow());
+        status_card.append(&bridge_status);
         status_card.append(&muted(if shared.smoke {
             "Режим проверки: MPRIS-воркер не запускается, буфер не читается."
         } else {
@@ -136,9 +133,7 @@ impl ControlView {
         status_card.append(&muted(
             "Буфер обмена: чтение только при фокусе, ручное добавление.",
         ));
-        status_card.append(&muted(
-            "Погода и док приложений не реализованы и не имитируются.",
-        ));
+        status_card.append(&muted("Док приложений пока недоступен в этой сборке."));
         root.append(&status_card);
 
         let now = Instant::now();
@@ -150,6 +145,7 @@ impl ControlView {
             shared,
             clock,
             state,
+            bridge_status,
             preset,
         }
     }
@@ -157,6 +153,8 @@ impl ControlView {
     /// Called once per second. Returns true on the tick where the countdown
     /// crossed zero, so the app can raise a notification exactly once.
     pub fn tick(&self) -> bool {
+        self.bridge_status
+            .set_text(&self.shared.shell_status.borrow());
         let now = Instant::now();
         let (left, due) = {
             let mut timer = self.shared.timers.borrow_mut();

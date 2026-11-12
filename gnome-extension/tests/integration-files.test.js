@@ -12,7 +12,7 @@ const dir = new URL('../integration/', import.meta.url);
 const read = name => readFileSync(new URL(name, dir), 'utf8');
 
 test('fixture and victim parse as ES modules with a gjs -m shebang and LF endings', () => {
-    for (const name of ['fixture-client.js', 'victim.js']) {
+    for (const name of ['fixture-client.js', 'victim.js', 'app-observer.js']) {
         execFileSync(process.execPath, ['--check', fileURLToPath(new URL(name, dir))]);
         const text = read(name);
         assert.ok(text.startsWith('#!/usr/bin/gjs -m\n'), `${name} shebang`);

@@ -1,6 +1,7 @@
 //! The island window: a compact pill that expands on hover or click.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -11,10 +12,12 @@ use tidemark_core::notes::Reminder;
 
 use crate::model;
 use crate::services::music::MusicEvent;
+use crate::services::shell::{self, Command as ShellCommand, Event as ShellEvent};
 use crate::ui::{
     clipboard::ClipboardView, control::ControlView, home::HomeView, notes::NotesView, settings,
     text::TextView, Shared,
 };
+use tidemark_core::shell::{Capability, FocusInfo, Rect, ShortcutId};
 
 const ISLAND_TITLE: &str = "tidemark-island";
 const SETTINGS_TITLE: &str = "Tidemark — настройки";
@@ -34,6 +37,18 @@ pub struct Island {
     root: gtk::Box,
     collapsed: gtk::Box,
     clock: gtk::Label,
+    status: gtk::Label,
+    restart: gtk::Button,
+    shell: RefCell<shell::Service>,
+    shell_caps: RefCell<Vec<Capability>>,
+    focus: RefCell<Option<FocusInfo>>,
+    shell_layout: RefCell<String>,
+    caps_lock: Cell<bool>,
+    sleep_armed: Cell<bool>,
+    primary_monitor: Cell<Option<u32>>,
+    fullscreen: RefCell<HashSet<u32>>,
+    shell_hidden: Cell<bool>,
+    last_placement: Cell<Option<Rect>>,
     mini: gtk::Label,
     pinned: Cell<bool>,
     hover_source: RefCell<Option<glib::SourceId>>,
@@ -131,6 +146,9 @@ impl Island {
         status.set_wrap(true);
         status.add_css_class("tidemark-status");
         expanded.append(&status);
+        let restart = gtk::Button::with_label("Перезапустить для GNOME…");
+        restart.set_visible(false);
+        expanded.append(&restart);
         revealer.set_child(Some(&expanded));
         root.append(&revealer);
 
@@ -152,6 +170,18 @@ impl Island {
             root,
             collapsed,
             clock,
+            status,
+            restart,
+            shell: RefCell::new(shell::Service::default()),
+            shell_caps: RefCell::new(Vec::new()),
+            focus: RefCell::new(None),
+            shell_layout: RefCell::new(String::new()),
+            caps_lock: Cell::new(false),
+            sleep_armed: Cell::new(false),
+            primary_monitor: Cell::new(None),
+            fullscreen: RefCell::new(HashSet::new()),
+            shell_hidden: Cell::new(false),
+            last_placement: Cell::new(None),
             mini,
             pinned: Cell::new(false),
             hover_source: RefCell::new(None),
@@ -167,6 +197,12 @@ impl Island {
     }
 
     fn wire(&self) {
+        let weak = self.weak();
+        self.restart.connect_clicked(move |_| {
+            if let Some(island) = weak.upgrade() {
+                island.offer_handover();
+            }
+        });
         let weak = self.weak();
         self.window.connect_realize(move |window| {
             if let Some(surface) = window.surface() {
@@ -297,6 +333,7 @@ impl Island {
         self.window
             .set_default_size(width.max(320), EXPANDED_HEIGHT);
         self.refresh_current();
+        self.place_shell();
     }
 
     pub fn collapse(&self) {
@@ -318,6 +355,8 @@ impl Island {
             config.collapsed_width as i32,
             config.collapsed_height as i32,
         );
+        drop(config);
+        self.place_shell();
     }
 
     fn update_input_region(&self) {
@@ -450,6 +489,245 @@ impl Island {
         Ok(())
     }
 
+    pub fn attach_shell(&self, service: shell::Service) {
+        self.shell.replace(service);
+    }
+
+    fn place_shell(&self) {
+        if !self.shell_caps.borrow().contains(&Capability::PlaceWindows) {
+            return;
+        }
+        let expanded = self.revealer.reveals_child();
+        let config = self.shared.config.borrow();
+        let rect = Rect {
+            x: 0,
+            y: config.top_offset as i32,
+            w: if expanded {
+                (config.expanded_width as i32).max(320)
+            } else {
+                config.collapsed_width as i32
+            },
+            h: if expanded {
+                EXPANDED_HEIGHT
+            } else {
+                config.collapsed_height as i32
+            },
+        };
+        if self.last_placement.get() != Some(rect)
+            && self.shell.borrow().send(ShellCommand::Place(rect))
+        {
+            self.last_placement.set(Some(rect));
+        }
+    }
+
+    fn apply_fullscreen(&self) {
+        let hide = shell::hide_for_fullscreen(
+            self.shared.config.borrow().hide_in_fullscreen,
+            self.primary_monitor.get(),
+            &self.fullscreen.borrow(),
+        );
+        if self.shell_hidden.replace(hide) != hide {
+            // set_visible maps without requesting activation; present() would
+            // steal focus from the application leaving fullscreen.
+            self.window.set_visible(!hide);
+            if !hide {
+                self.last_placement.set(None);
+                self.place_shell();
+            }
+        }
+    }
+
+    pub fn handle_shell(&self, event: ShellEvent) {
+        match event {
+            ShellEvent::Connected(caps) => {
+                self.shell_caps.replace(caps);
+                self.last_placement.set(None);
+                self.restart.set_visible(false);
+                let implemented = [
+                    Capability::PlaceWindows,
+                    Capability::FocusTracking,
+                    Capability::FullscreenTracking,
+                    Capability::MaximizedTracking,
+                    Capability::KeyboardLayout,
+                    Capability::CapsLock,
+                    Capability::GlobalShortcuts,
+                ];
+                let names: Vec<_> = implemented
+                    .iter()
+                    .filter(|cap| self.shell_caps.borrow().contains(cap))
+                    .map(|cap| model::capability_text(*cap).0)
+                    .collect();
+                self.status
+                    .set_text(&format!("GNOME подключён · {}", names.join(", ")));
+                self.place_shell();
+            }
+            ShellEvent::Disconnected(message) => {
+                self.shell_caps.borrow_mut().clear();
+                self.primary_monitor.set(None);
+                self.fullscreen.borrow_mut().clear();
+                self.apply_fullscreen();
+                self.focus.replace(None);
+                self.shell_layout.borrow_mut().clear();
+                self.caps_lock.set(false);
+                self.status.set_text(&message);
+            }
+            ShellEvent::NeedsHandover => {
+                self.restart.set_visible(true);
+                self.status.set_text("GNOME требует доверенный запуск. Перезапуск возможен только с вашим подтверждением.");
+            }
+            ShellEvent::HandoverAccepted => self.app.quit(),
+            ShellEvent::Focus(focus) => {
+                self.focus.replace(focus);
+                self.refresh_shell_state();
+            }
+            ShellEvent::Layout(layout) => {
+                self.shell_layout.replace(layout);
+                self.refresh_shell_state();
+            }
+            ShellEvent::CapsLock(on) => {
+                self.caps_lock.set(on);
+                self.refresh_shell_state();
+            }
+            ShellEvent::Maximized(covered) => {
+                if covered && self.shared.config.borrow().shrink_under_windows {
+                    self.collapse();
+                }
+            }
+            ShellEvent::PrimaryMonitor(monitor) => {
+                self.primary_monitor.set(Some(monitor));
+                self.apply_fullscreen();
+            }
+            ShellEvent::Fullscreen(monitor, on) => {
+                if on {
+                    self.fullscreen.borrow_mut().insert(monitor);
+                } else {
+                    self.fullscreen.borrow_mut().remove(&monitor);
+                }
+                self.apply_fullscreen();
+            }
+            ShellEvent::Shortcut(ShortcutId::Launcher) => {
+                if self.revealer.reveals_child() {
+                    self.pinned.set(false);
+                    self.collapse();
+                } else {
+                    self.pinned.set(true);
+                    self.expand();
+                }
+            }
+            ShellEvent::Shortcut(ShortcutId::ToggleTheme) => {
+                let dark = self.shared.is_dark();
+                self.shared.config.borrow_mut().theme = if dark { "light" } else { "dark" }.into();
+                self.shared.save_config();
+                self.shared.reload_css();
+                self.update_input_region();
+            }
+            ShellEvent::Shortcut(ShortcutId::LikeTrack) => {
+                self.status
+                    .set_text("Лайки Yandex Music пока недоступны; действие не выполнено.");
+            }
+            ShellEvent::Bindings(results) => {
+                let failed: Vec<_> = results
+                    .iter()
+                    .filter(|(_, ok)| !ok)
+                    .map(|(id, _)| id.as_str())
+                    .collect();
+                if !failed.is_empty() {
+                    self.status
+                        .set_text(&format!("Сочетания заняты: {}", failed.join(", ")));
+                }
+            }
+            ShellEvent::Error(error) => self.status.set_text(&format!("GNOME: {error}")),
+        }
+        self.shared
+            .shell_status
+            .replace(self.status.text().to_string());
+    }
+
+    fn refresh_shell_state(&self) {
+        let focus = self.focus.borrow();
+        let title = focus
+            .as_ref()
+            .map(|v| v.title.chars().take(65).collect::<String>())
+            .unwrap_or_else(|| "Нет активного приложения".into());
+        self.status.set_text(&format!(
+            "GNOME · {title} · {}{}",
+            self.shell_layout.borrow(),
+            if self.caps_lock.get() {
+                " · Caps Lock"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    fn offer_handover(&self) {
+        use tidemark_core::timer::State;
+        if matches!(
+            self.shared.timers.borrow().state,
+            State::Running { .. } | State::Paused { .. }
+        ) || self.sleep_armed.get()
+            || !self.text.text().is_empty()
+        {
+            self.status.set_text("Перед перезапуском завершите таймеры и сохраните текст из вкладки «Текст»: их перенос пока недоступен.");
+            return;
+        }
+        let dialog = adw::MessageDialog::builder().transient_for(&self.window)
+            .heading("Перезапустить с интеграцией GNOME?")
+            .body("Заметки, напоминания и история будут сохранены. GNOME запустит доверенный экземпляр приложения.")
+            .build();
+        dialog.add_response("cancel", "Отмена");
+        dialog.add_response("restart", "Сохранить и перезапустить");
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let weak = self.weak();
+        dialog.connect_response(Some("restart"), move |_, _| {
+            if let Some(island) = weak.upgrade() {
+                // Recheck after the dialog: a timer may have been armed meanwhile.
+                if matches!(
+                    island.shared.timers.borrow().state,
+                    State::Running { .. } | State::Paused { .. }
+                ) || island.sleep_armed.get()
+                    || !island.text.text().is_empty()
+                {
+                    island
+                        .status
+                        .set_text("Активные таймеры препятствуют безопасному перезапуску.");
+                    return;
+                }
+                island.notes.save_now();
+                let saved =
+                    (|| -> std::io::Result<()> {
+                        island.shared.notes.borrow().save_to(
+                            &tidemark_core::config::Config::data_dir().join("notes.json"),
+                        )?;
+                        island
+                            .shared
+                            .config
+                            .borrow()
+                            .save_to(&tidemark_core::config::Config::path())?;
+                        island
+                            .shared
+                            .clip
+                            .borrow()
+                            .save_to(&tidemark_core::clip_history::dir())?;
+                        Ok(())
+                    })();
+                if let Err(error) = saved {
+                    island.status.set_text(&format!(
+                        "Перезапуск отменён: не удалось сохранить данные: {error}"
+                    ));
+                    return;
+                }
+                if !island.shell.borrow().send(ShellCommand::Handover) {
+                    island
+                        .status
+                        .set_text("Мост GNOME занят; перезапуск не запрошен. Повторите попытку.");
+                }
+            }
+        });
+        dialog.present();
+    }
+
     pub fn refresh_current(&self) {
         match self.stack.visible_child_name().as_deref() {
             Some("home") => self.home.refresh_tiles(),
@@ -465,12 +743,19 @@ impl Island {
     }
 
     pub fn handle_music(&self, event: &MusicEvent) {
+        match event {
+            MusicEvent::SleepArmed(_) => self.sleep_armed.set(true),
+            MusicEvent::SleepCancelled | MusicEvent::SleepFired => self.sleep_armed.set(false),
+            _ => {}
+        }
         self.home.handle_event(event);
         self.update_collapsed();
     }
 
     pub fn tick(&self) {
         self.update_input_region();
+        self.apply_fullscreen();
+        self.place_shell();
         self.clock.set_text(&local_clock());
         self.home.tick();
         self.update_collapsed();
@@ -537,10 +822,10 @@ impl Island {
     }
 
     pub fn settings_root(&self, window: &adw::PreferencesWindow) -> gtk::Widget {
-        window
-            .child()
-            .map(|child| child.upcast())
-            .unwrap_or_else(|| window.clone().upcast())
+        // Snapshot the native window, whose CSS node paints the background
+        // and whose internal children include the header. GtkWindow::child
+        // exposes only an internal content node with a transparent background.
+        window.clone().upcast()
     }
 }
 

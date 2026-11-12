@@ -312,10 +312,15 @@ fn system_page(shared: &Shared) -> adw::PreferencesPage {
     adapter.set_title("GNOME Shell");
     let state = adw::ActionRow::new();
     state.set_title("Адаптер org.tidemark.Shell1");
-    state.set_subtitle(if crate::services::shell::launched_by_adapter() {
-        "Процесс запущен расширением. Привилегированные вызовы ещё не подключены."
-    } else {
-        "Расширение не подключено. Остров работает как обычное окно."
+    state.set_subtitle(&shared.shell_status.borrow());
+    let weak = state.downgrade();
+    let status = shared.shell_status.clone();
+    gtk::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        let Some(row) = weak.upgrade() else {
+            return gtk::glib::ControlFlow::Break;
+        };
+        row.set_subtitle(&status.borrow());
+        gtk::glib::ControlFlow::Continue
     });
     adapter.add(&state);
     let contract = adw::ActionRow::new();

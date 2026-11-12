@@ -28,6 +28,7 @@
 #   TIDEMARK_HARNESS_ARTIFACT_DIR=dir  copy results, phase state and the shell log there
 #   TIDEMARK_HARNESS_STRICT=1          [optional] checks fail the run too
 #   TIDEMARK_HARNESS_TIMEOUT=seconds   whole private session (default 240)
+#   TIDEMARK_HARNESS_APP=1             test installed /usr/bin/tidemark instead of the GJS fixture
 # Exit status: 0 when every required check passed; 1 when a check failed;
 # 2 when the harness refused to run.
 
@@ -166,6 +167,11 @@ inner() {
         result "FAIL org.tidemark.Shell never appeared"
     fi
 
+    if [[ "${TIDEMARK_HARNESS_APP:-}" == 1 ]]; then
+        timeout 90s gjs -m "$TIDEMARK_HARNESS_ROOT/fixture/app-observer.js" \
+            || result "FAIL installed application observer did not finish"
+    fi
+
     local waited=0
     while [[ ! -f "$TIDEMARK_HARNESS_OUT/done" ]]; do
         if ! kill -0 "$shell_pid" 2>/dev/null; then
@@ -208,6 +214,7 @@ mkdir -p "$TIDEMARK_HARNESS_OUT" "$TIDEMARK_HARNESS_ROOT"/{config,data/gnome-she
 chmod 700 "$TIDEMARK_HARNESS_ROOT/runtime"
 cp -r "$EXT_SRC" "$TIDEMARK_HARNESS_ROOT/data/gnome-shell/extensions/$UUID"
 cp "$HERE/fixture-client.js" "$HERE/victim.js" "$EXT_SRC/contract.js" "$TIDEMARK_HARNESS_ROOT/fixture/"
+cp "$HERE/app-observer.js" "$TIDEMARK_HARNESS_ROOT/fixture/"
 chmod 755 "$TIDEMARK_HARNESS_ROOT/fixture/fixture-client.js" "$TIDEMARK_HARNESS_ROOT/fixture/victim.js"
 TIDEMARK_HARNESS_INNER_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 (umask 077 && printf '%s' "$TIDEMARK_HARNESS_INNER_TOKEN" >"$TIDEMARK_HARNESS_ROOT/.inner-token")
@@ -223,6 +230,10 @@ export TIDEMARK_ADAPTER_CLIENT="$TIDEMARK_HARNESS_ROOT/fixture/fixture-client.js
     TIDEMARK_VICTIM="$TIDEMARK_HARNESS_ROOT/fixture/victim.js" TIDEMARK_HARNESS_DIR="$TIDEMARK_HARNESS_OUT" \
     TIDEMARK_TEST_WAYLAND_DISPLAY="$WAYLAND_NAME" TIDEMARK_HARNESS_ROOT TIDEMARK_HARNESS_OUT \
     TIDEMARK_HARNESS_INNER_TOKEN TIDEMARK_HARNESS_OUTER_BUS
+if [[ "${TIDEMARK_HARNESS_APP:-}" == 1 ]]; then
+    [[ -x /usr/bin/tidemark ]] || die "installed /usr/bin/tidemark required for application mode"
+    export TIDEMARK_ADAPTER_CLIENT=/usr/bin/tidemark
+fi
 
 echo "run-headless: private session in $TIDEMARK_HARNESS_ROOT"
 timeout "${TIDEMARK_HARNESS_TIMEOUT:-240}" dbus-run-session -- bash "$0" --inner \
@@ -230,12 +241,14 @@ timeout "${TIDEMARK_HARNESS_TIMEOUT:-240}" dbus-run-session -- bash "$0" --inner
 
 echo "---- results"
 cat "$TIDEMARK_HARNESS_OUT"/results-harness.txt "$TIDEMARK_HARNESS_OUT"/results-phase1.txt \
-    "$TIDEMARK_HARNESS_OUT"/results-phase2.txt 2>/dev/null || true
+    "$TIDEMARK_HARNESS_OUT"/results-phase2.txt "$TIDEMARK_HARNESS_OUT"/results-app.txt 2>/dev/null || true
 results=$(cat "$TIDEMARK_HARNESS_OUT"/results-*.txt 2>/dev/null || true)
 status=0
 if grep -E '^FAIL ' <<<"$results" | grep -qv '^FAIL \[optional\]'; then status=1; fi
 if [[ "${TIDEMARK_HARNESS_STRICT:-}" == 1 ]] && grep -qE '^FAIL \[optional\]' <<<"$results"; then status=1; fi
-for required in results-phase1.txt results-phase2.txt; do
+required_results=(results-phase1.txt results-phase2.txt)
+if [[ "${TIDEMARK_HARNESS_APP:-}" == 1 ]]; then required_results=(results-app.txt); fi
+for required in "${required_results[@]}"; do
     if [[ ! -f "$TIDEMARK_HARNESS_OUT/$required" ]]; then
         echo "FAIL missing $required"
         status=1
