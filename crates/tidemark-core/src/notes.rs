@@ -1,10 +1,12 @@
-//! The scratch note and reminders, saved in %APPDATA%\win-island.
+//! The scratch note and reminders, saved as `notes.json` in the data
+//! directory (`%APPDATA%\win-island` on Windows; see `paths`).
 //! Reminders are typed as plain Russian phrases:
 //! "через 15 мин купить хлеб", "в 18:30 позвонить маме",
 //! "завтра в 9 созвон", "через 2 ч забрать посылку".
 
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reminder {
@@ -19,20 +21,26 @@ pub struct Store {
     pub reminders: Vec<Reminder>,
 }
 
-fn path() -> std::path::PathBuf {
-    Config::dir().join("notes.json")
+fn path() -> PathBuf {
+    Config::data_dir().join("notes.json")
 }
 
 impl Store {
     pub fn load() -> Self {
-        std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        Self::load_from(&path())
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
 
     pub fn save(&self) {
-        let _ = std::fs::create_dir_all(Config::dir());
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path(), text);
-        }
+        let _ = self.save_to(&path());
+    }
+
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        crate::paths::write_atomic(path, text.as_bytes())
     }
 
     pub fn add(&mut self, r: Reminder) {
@@ -182,5 +190,18 @@ mod tests {
         assert_eq!(when_label(NOW + 300, NOW, SINCE), "через 5 мин");
         assert_eq!(when_label(MIDNIGHT + 18 * 3600 + 1800, NOW, SINCE), "в 18:30");
         assert_eq!(when_label(MIDNIGHT + 86_400 + 9 * 3600, NOW, SINCE), "завтра в 9:00");
+    }
+
+    #[test]
+    fn store_round_trip_in_temp_dir() {
+        let tmp = crate::paths::test_dir::TempDir::new("notes");
+        let file = tmp.path().join("notes.json");
+        let mut s = Store { note: "черновик".into(), ..Store::default() };
+        s.add(Reminder { at: 10, text: "позвонить".into() });
+        s.save_to(&file).unwrap();
+        let back = Store::load_from(&file);
+        assert_eq!(back.note, "черновик");
+        assert_eq!(back.reminders, s.reminders);
+        assert!(Store::load_from(&tmp.path().join("missing.json")).reminders.is_empty());
     }
 }

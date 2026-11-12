@@ -1,7 +1,9 @@
-//! User configuration stored in %APPDATA%\win-island\config.toml.
+//! User configuration: `config.toml` in the config directory
+//! (`%APPDATA%\win-island` on Windows, `$XDG_CONFIG_HOME/tidemark` on Linux;
+//! see `paths`).
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -103,9 +105,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Folder holding `config.toml`. On Windows this is also the data folder.
     pub fn dir() -> PathBuf {
-        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into());
-        base.join("win-island")
+        crate::paths::current().config
+    }
+
+    /// Folder for notes, clipboard history, lyrics cache and the shelf.
+    pub fn data_dir() -> PathBuf {
+        crate::paths::current().data
     }
 
     pub fn path() -> PathBuf {
@@ -126,21 +133,30 @@ impl Config {
     /// Loads the config, writing the defaults on first run. Never fails:
     /// a broken file falls back to defaults so the island always starts.
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::path()) {
+        Self::load_from(&Self::path())
+    }
+
+    /// `load` for an explicit file. A missing file is created with the
+    /// defaults; an unreadable or broken one is left untouched.
+    pub fn load_from(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str::<Config>(&text).unwrap_or_default().upgrade(),
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let cfg = Self::default();
-                cfg.save();
+                let _ = cfg.save_to(path);
                 cfg
             }
+            Err(_) => Self::default(),
         }
     }
 
     pub fn save(&self) {
-        let _ = std::fs::create_dir_all(Self::dir());
-        if let Ok(text) = toml::to_string(self) {
-            let _ = std::fs::write(Self::path(), text);
-        }
+        let _ = self.save_to(&Self::path());
+    }
+
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let text = toml::to_string(self).map_err(std::io::Error::other)?;
+        crate::paths::write_atomic(path, text.as_bytes())
     }
 }
 
@@ -166,6 +182,42 @@ mod tests {
         assert_eq!(legacy.upgrade().search_url,Config::default().search_url);
         let custom: Config=toml::from_str("search_url = 'https://example.com/find?q={q}'").unwrap();
         assert_eq!(custom.upgrade().search_url,"https://example.com/find?q={q}");
+    }
+
+    #[test]
+    fn missing_file_is_created_with_defaults() {
+        let tmp = crate::paths::test_dir::TempDir::new("cfg-missing");
+        let file = tmp.path().join("sub").join("config.toml");
+        let cfg = Config::load_from(&file);
+        assert_eq!(cfg.search_url, Config::default().search_url);
+        let written: Config = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written.home_tiles, Config::default().home_tiles);
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let tmp = crate::paths::test_dir::TempDir::new("cfg-roundtrip");
+        let file = tmp.path().join("config.toml");
+        let cfg = Config {
+            weather_city: "Москва".into(),
+            opacity: 0.5,
+            home_tiles: vec!["media".into(), "apps".into()],
+            ..Config::default()
+        };
+        cfg.save_to(&file).unwrap();
+        let back = Config::load_from(&file);
+        assert_eq!(back.weather_city, "Москва");
+        assert_eq!(back.opacity, 0.5);
+        assert_eq!(back.home_tiles, ["media", "apps"]);
+    }
+
+    #[test]
+    fn broken_file_loads_defaults_without_overwrite() {
+        let tmp = crate::paths::test_dir::TempDir::new("cfg-broken");
+        let file = tmp.path().join("config.toml");
+        std::fs::write(&file, "theme = [broken").unwrap();
+        assert_eq!(Config::load_from(&file).theme, Config::default().theme);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "theme = [broken");
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Clipboard history model: pinned first, newest within each group, de-duplicated,
-//! capped, and saved as JSON in %APPDATA%\win-island\clipboard (images sit
-//! next to it as PNG files). No Windows APIs here; see `clipboard.rs`.
+//! capped, and saved as JSON in `<data dir>/clipboard` (images sit next to it
+//! as PNG files; see `paths`). No OS APIs here; the Windows reader is
+//! `clipboard.rs` in the app crate.
 
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const MAX_ITEMS: usize = 50;
 /// Longer texts are not kept (and not shown) to keep the file small.
@@ -42,16 +43,19 @@ pub struct History {
 }
 
 pub fn dir() -> PathBuf {
-    Config::dir().join("clipboard")
+    Config::data_dir().join("clipboard")
 }
 
-fn file() -> PathBuf {
-    dir().join("history.json")
-}
+const FILE: &str = "history.json";
 
 impl History {
     pub fn load() -> Self {
-        std::fs::read_to_string(file()).map(|text| Self::from_json(&text)).unwrap_or_default()
+        Self::load_from(&dir())
+    }
+
+    /// Loads `history.json` from the history folder `dir`.
+    pub fn load_from(dir: &Path) -> Self {
+        std::fs::read_to_string(dir.join(FILE)).map(|text| Self::from_json(&text)).unwrap_or_default()
     }
 
     fn from_json(text: &str) -> Self {
@@ -61,10 +65,12 @@ impl History {
     }
 
     pub fn save(&self) {
-        let _ = std::fs::create_dir_all(dir());
-        if let Ok(text) = serde_json::to_string(self) {
-            let _ = std::fs::write(file(), text);
-        }
+        let _ = self.save_to(&dir());
+    }
+
+    pub fn save_to(&self, dir: &Path) -> std::io::Result<()> {
+        let text = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        crate::paths::write_atomic(&dir.join(FILE), text.as_bytes())
     }
 
     /// Adds `entry` as newest in its group. Copying an existing entry preserves
@@ -376,5 +382,17 @@ mod tests {
         assert!(loaded.items.iter().all(|i| i.pinned));
         assert_eq!(loaded.items[0].entry, text("54"));
         assert_eq!(loaded.items[49].entry, text("5"));
+    }
+
+    #[test]
+    fn history_round_trip_in_temp_dir() {
+        let tmp = crate::paths::test_dir::TempDir::new("clip");
+        let mut h = History::default();
+        h.push(text("a"), 1);
+        h.push(Entry::Files { paths: vec!["/home/u/x.txt".into()] }, 2);
+        h.toggle_pin(1);
+        h.save_to(tmp.path()).unwrap();
+        let back = History::load_from(tmp.path());
+        assert_eq!(back.items, h.items);
     }
 }

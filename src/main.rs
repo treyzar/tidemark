@@ -2,26 +2,21 @@
 
 mod active_app;
 mod agent;
-mod anim;
 mod audio;
 mod autostart;
 mod beat;
 mod brand;
 mod capture;
-mod clip_history;
 mod clipboard;
-mod config;
 mod control;
 mod dock;
 mod fullscreen;
 mod http;
 mod island;
 mod launcher;
-mod layout;
 mod lyrics;
 mod legacy_players;
 mod media;
-mod notes;
 mod overlay;
 mod privacy;
 mod recognize;
@@ -31,15 +26,16 @@ mod settings;
 mod shelf;
 mod signals;
 mod stats;
-mod text_tools;
-mod textinput;
 mod theme;
 mod throne;
-mod timer;
 mod translate;
 mod tray;
 mod weather;
 mod yandex_music;
+
+// Portable modules live in `tidemark-core` (single source, shared with the
+// Linux app); re-exported here so `crate::<module>` paths keep working.
+use tidemark_core::{anim, clip_history, config, layout, notes, text_tools, textinput, timer};
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, LPARAM, WPARAM};

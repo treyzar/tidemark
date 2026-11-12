@@ -15,7 +15,6 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
@@ -45,18 +44,7 @@ pub fn has_hidden(text: &str) -> bool {
     !text.chars().all(allowed) || mixed
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct Message {
-    pub kind: String,
-    #[serde(default)]
-    pub source: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub options: Vec<String>,
-}
+pub use tidemark_core::agent_wire::Message;
 
 /// Something for the UI thread.
 pub enum Event {

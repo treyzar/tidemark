@@ -36,26 +36,7 @@ impl Item {
     }
 }
 
-const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
-const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
-
-/// Retypes text as if the other layout (RU <-> EN) had been on.
-pub fn swap_layout(s: &str) -> String {
-    let en: Vec<char> = EN.chars().collect();
-    let ru: Vec<char> = RU.chars().collect();
-    s.chars()
-        .map(|c| {
-            let lc = c.to_lowercase().next().unwrap_or(c);
-            if let Some(i) = en.iter().position(|&e| e == lc) {
-                ru[i]
-            } else if let Some(i) = ru.iter().position(|&r| r == lc) {
-                en[i]
-            } else {
-                lc
-            }
-        })
-        .collect()
-}
+pub use tidemark_core::keyboard::swap_layout;
 
 /// How well `name` (lowercase) matches `q` (lowercase); 0 = no match.
 pub fn score(name: &str, q: &str) -> u32 {
@@ -333,14 +314,6 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn layout_swap() {
-        assert_eq!(swap_layout("ghbdtn"), "привет");
-        assert_eq!(swap_layout("руддщ"), "hello");
-        assert_eq!(swap_layout("Ntktuhfv"), "телеграм");
-        assert_eq!(swap_layout("123"), "123");
-    }
 
     #[test]
     fn scoring_order() {

@@ -18,8 +18,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-#[path="media_artwork.rs"]
-mod artwork;
+use tidemark_core::media_artwork as artwork;
 
 pub const WM_MEDIA: u32 = WM_APP + 3;
 /// Cover art is decoded once, cropped square and scaled to this size.

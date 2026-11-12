@@ -255,6 +255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidemark-core"
+version = "1.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,6 +317,7 @@ dependencies = [
  "rqrr",
  "serde",
  "serde_json",
+ "tidemark-core",
  "toml",
  "windows",
  "windows-core",

@@ -19,8 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-#[path = "settings_motion.rs"]
-mod motion;
+use tidemark_core::settings_motion as motion;
 #[path = "settings_skin.rs"]
 mod skin;
 use motion::Tween;

@@ -1,0 +1,37 @@
+name: Ubuntu port checks
+
+on:
+  push:
+    branches: [feature/ubuntu-support]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This checks the port's shared logic and transport adapters. It does not
+# publish a Linux release or stand in for the GNOME desktop acceptance tests.
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Test shared Rust logic
+        run: cargo test --manifest-path crates/tidemark-core/Cargo.toml --locked
+
+  windows-regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - run: cargo test --workspace --release --locked
+      - name: Check embedded resource paths
+        shell: pwsh
+        run: |
+          rustc --test build.rs -o "$env:RUNNER_TEMP\resource-path-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\resource-path-tests.exe"
