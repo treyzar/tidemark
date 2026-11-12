@@ -34,6 +34,48 @@ impl std::fmt::Display for MprisPlayerId {
     }
 }
 
+/// Prefer audible playback. Keep the current identity when several players
+/// play at once, or when all are paused, to avoid needless card switching.
+pub fn preferred_player(
+    current: Option<&MprisPlayerId>,
+    statuses: &[(MprisPlayerId, bool)],
+) -> Option<MprisPlayerId> {
+    statuses
+        .iter()
+        .find(|(id, playing)| *playing && Some(id) == current)
+        .or_else(|| statuses.iter().find(|(_, playing)| *playing))
+        .or_else(|| statuses.iter().find(|(id, _)| Some(id) == current))
+        .or_else(|| statuses.first())
+        .map(|(id, _)| id.clone())
+}
+
+#[cfg(test)]
+mod selection_regressions {
+    use super::*;
+    #[test]
+    fn playing_player_replaces_a_paused_card_but_not_an_active_one() {
+        let old = MprisPlayerId::new("org.mpris.MediaPlayer2.old", ":1.1");
+        let active = MprisPlayerId::new("org.mpris.MediaPlayer2.new", ":1.2");
+        assert_eq!(
+            preferred_player(Some(&old), &[(old.clone(), false), (active.clone(), true)]),
+            Some(active.clone())
+        );
+        assert_eq!(
+            preferred_player(Some(&old), &[(active.clone(), true), (old.clone(), true)]),
+            Some(old.clone())
+        );
+        assert_eq!(
+            preferred_player(Some(&old), &[(active.clone(), false), (old.clone(), false)]),
+            Some(old.clone())
+        );
+        assert_eq!(
+            preferred_player(Some(&old), &[(active.clone(), false)]),
+            Some(active)
+        );
+        assert_eq!(preferred_player(Some(&old), &[]), None);
+    }
+}
+
 /// A point-in-time view of a player, the MPRIS analogue of `MediaState`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackSnapshot {

@@ -82,7 +82,7 @@ impl HomeView {
         title.set_xalign(0.0);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.add_css_class("tile-title");
-        let artist = gtk::Label::new(Some("Запустите музыку в MPRIS-плеере"));
+        let artist = gtk::Label::new(Some("Откройте музыкальный плеер"));
         artist.set_xalign(0.0);
         artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
         artist.add_css_class("muted");
@@ -141,6 +141,7 @@ impl HomeView {
         favorite_button.set_tooltip_text(Some("Изменить «Мне нравится» в открытой Яндекс Музыке"));
         let favorite_status = muted("Состояние избранного ещё не проверено");
         favorite_status.add_css_class("tiny");
+        favorite_status.set_visible(false);
         {
             let service = favorite_service.clone();
             let track = favorite_track.clone();
@@ -152,6 +153,7 @@ impl HomeView {
                     return;
                 };
                 let want = known.get() != Some(true);
+                status.set_visible(true);
                 match service.borrow_mut().start(snapshot, want) {
                     Ok(_) => {
                         button.set_sensitive(false);
@@ -170,8 +172,6 @@ impl HomeView {
                 }
             });
         }
-        music.append(&favorite_button);
-        music.append(&favorite_status);
 
         let volume_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let volume_icon = gtk::Image::from_icon_name("audio-volume-medium-symbolic");
@@ -195,32 +195,34 @@ impl HomeView {
         let music_service = shared.music.clone();
         cancel_sleep.connect_clicked(move |_| music_service.send(MusicCommand::CancelSleep));
         sleep_row.append(&cancel_sleep);
-        music.append(&sleep_row);
+        let sleep_popover = gtk::Popover::new();
+        sleep_popover.set_child(Some(&sleep_row));
+        let sleep_button = gtk::MenuButton::new();
+        sleep_button.set_label("Таймер сна");
+        sleep_button.set_popover(Some(&sleep_popover));
 
         let sleep_status = gtk::Label::new(Some("Таймер сна не задан"));
         sleep_status.set_xalign(0.0);
         sleep_status.add_css_class("tiny");
+        sleep_status.set_visible(false);
         music.append(&sleep_status);
 
-        let status = gtk::Label::new(Some(if shared.smoke {
-            "Режим проверки: MPRIS не запускается."
-        } else {
-            "MPRIS: ожидание плеера."
-        }));
+        let status = gtk::Label::new(None);
         status.set_xalign(0.0);
         status.set_wrap(true);
         status.add_css_class("tiny");
+        status.set_visible(false);
         music.append(&status);
 
-        let refresh = gtk::Button::with_label("Обновить");
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.set_tooltip_text(Some("Обновить музыку"));
         {
             let service = shared.music.clone();
             refresh.connect_clicked(move |_| service.send(MusicCommand::Refresh));
         }
-        music.append(&refresh);
 
         let online = Rc::new(RefCell::new(OnlineHome::default()));
-        let lyrics_button = gtk::Button::with_label("Текст песни онлайн");
+        let lyrics_button = gtk::Button::with_label("Текст песни");
         lyrics_button.set_sensitive(false);
         lyrics_button.set_tooltip_text(Some(
             "Отправить название и исполнителя текущего трека в LRCLIB.",
@@ -232,6 +234,7 @@ impl HomeView {
         lyrics_status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         lyrics_status.set_max_width_chars(1);
         lyrics_status.add_css_class("tiny");
+        lyrics_status.set_visible(false);
         let lyrics_buffer = gtk::TextBuffer::new(None);
         let lyrics_view = gtk::TextView::with_buffer(&lyrics_buffer);
         lyrics_view.set_editable(false);
@@ -242,17 +245,30 @@ impl HomeView {
         lyrics_scroll.set_size_request(-1, 160);
         lyrics_scroll.set_child(Some(&lyrics_view));
         lyrics_scroll.set_visible(false);
-        music.append(&lyrics_button);
+        let quick_actions = gtk::FlowBox::new();
+        quick_actions.set_selection_mode(gtk::SelectionMode::None);
+        quick_actions.set_min_children_per_line(1);
+        quick_actions.set_max_children_per_line(4);
+        quick_actions.set_column_spacing(6);
+        quick_actions.set_row_spacing(6);
+        quick_actions.insert(&favorite_button, -1);
+        quick_actions.insert(&lyrics_button, -1);
+        quick_actions.insert(&sleep_button, -1);
+        quick_actions.insert(&refresh, -1);
+        music.append(&quick_actions);
+        music.append(&favorite_status);
         music.append(&lyrics_status);
         music.append(&lyrics_scroll);
         {
             let online = online.clone();
             let smoke = shared.smoke;
+            let lyrics_status = lyrics_status.clone();
             lyrics_button.connect_clicked(move |button| {
                 if smoke {
                     return;
                 }
                 let mut online = online.borrow_mut();
+                lyrics_status.set_visible(true);
                 online.lyrics_requested = online.lyrics.key().cloned();
                 button.set_sensitive(false);
             });
@@ -316,6 +332,7 @@ impl HomeView {
                 self.favorite_button.set_label("В избранное Яндекса");
                 self.favorite_status
                     .set_text("Состояние избранного ещё не проверено");
+                self.favorite_status.set_visible(false);
             }
             self.favorite_track.replace(snapshot.cloned());
             self.poll_favorite();
@@ -353,8 +370,7 @@ impl HomeView {
                     None => self.cover_stack.set_visible_child_name("placeholder"),
                 }
                 self.status.remove_css_class("danger");
-                self.status
-                    .set_text(&format!("MPRIS: {}", snapshot.player.bus_name));
+                self.status.set_visible(false);
                 self.artist
                     .set_tooltip_text(Some(&snapshot.player.to_string()));
                 self.snapshot.replace(Some(snapshot.clone()));
@@ -364,7 +380,7 @@ impl HomeView {
                 self.open_target.replace(None);
                 self.open_player.set_sensitive(false);
                 self.title.set_text("Ничего не играет");
-                self.artist.set_text("Запустите музыку в MPRIS-плеере");
+                self.artist.set_text("Откройте музыкальный плеер");
                 self.time.set_text("0:00");
                 self.play.set_icon_name("media-playback-start-symbolic");
                 self.progress.set_sensitive(false);
@@ -372,21 +388,24 @@ impl HomeView {
                 self.volume.set_sensitive(false);
                 self.cover_stack.set_visible_child_name("placeholder");
                 self.status.remove_css_class("danger");
-                self.status.set_text("MPRIS: плееров не найдено.");
+                self.status.set_visible(false);
                 self.snapshot.replace(None);
             }
             MusicEvent::Error(message) => {
                 self.status.add_css_class("danger");
+                self.status.set_visible(true);
                 self.status.set_text(message);
             }
             MusicEvent::SleepArmed(minutes) => {
+                self.sleep_status.set_visible(true);
                 self.sleep_status
                     .set_text(&format!("Сон через {minutes} мин; плеер закреплён."));
             }
             MusicEvent::SleepCancelled => {
-                self.sleep_status.set_text("Таймер сна отменён.");
+                self.sleep_status.set_visible(false);
             }
             MusicEvent::SleepFired => {
+                self.sleep_status.set_visible(true);
                 self.sleep_status
                     .set_text("Таймер сна сработал: воспроизведение приостановлено.");
             }
@@ -419,6 +438,7 @@ impl HomeView {
         let mut service = self.favorite_service.borrow_mut();
         if let Some(outcome) = service.try_recv() {
             if outcome.current {
+                self.favorite_status.set_visible(true);
                 match outcome.result {
                     Ok(liked) => {
                         self.favorite_known.set(Some(liked));

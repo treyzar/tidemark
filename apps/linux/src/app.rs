@@ -240,6 +240,14 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
                 window.close();
                 island.agent.preview();
             } else if step == model::TABS.len() + 2 {
+                // Preserve the overflowing card and its measured hierarchy
+                // before the strict check exits, so native CI can identify
+                // the widget imposing the unexpected minimum height.
+                render_png(
+                    &island.root_widget(),
+                    &out_dir.join("island-agent-card.png"),
+                )?;
+                dump_layout(&island.root_widget(), 0);
                 island.check_geometry(true)?;
                 if !island.agent.root.is_visible() {
                     return Err("agent preview did not render".into());
@@ -324,4 +332,21 @@ fn render_png(widget: &gtk::Widget, path: &Path) -> Result<(), String> {
     texture
         .save_to_png(path)
         .map_err(|error| format!("save {}: {error}", path.display()))
+}
+
+fn dump_layout(widget: &gtk::Widget, depth: usize) {
+    let (min, natural, _, _) = widget.measure(gtk::Orientation::Vertical, widget.width().max(1));
+    println!(
+        "SMOKE_LAYOUT depth={depth} type={} css={:?} visible={} child_visible={} mapped={} content={}x{} allocated={}x{} min_h={min} natural_h={natural}",
+        widget.type_().name(), widget.css_classes(), widget.is_visible(), widget.is_child_visible(),
+        widget.is_mapped(), widget.width(), widget.height(), widget.allocated_width(), widget.allocated_height(),
+    );
+    if depth >= 5 {
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        dump_layout(&widget, depth + 1);
+    }
 }

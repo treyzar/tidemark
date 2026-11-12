@@ -329,33 +329,43 @@ fn refresh(
         return;
     }
 
-    let mut chosen = current.clone().filter(|id| players.iter().any(|p| p == id));
-    if chosen.is_none() {
-        for player in &players {
-            if let Ok(snapshot) = connection.snapshot(player) {
-                if snapshot.playing {
-                    chosen = Some(player.clone());
-                    break;
-                }
-            }
+    let mut snapshots = Vec::with_capacity(players.len());
+    let mut first_error = None;
+    for player in &players {
+        match connection.snapshot(player) {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(error) if first_error.is_none() => first_error = Some(error.to_string()),
+            Err(_) => (),
         }
     }
-    let player = chosen
-        .or_else(|| players.first().cloned())
-        .expect("players is not empty");
-
-    match connection.snapshot(&player) {
-        Ok(snapshot) => {
-            let cover = artwork.cover(&snapshot);
-            *current = Some(player);
-            *last_snapshot = Some(snapshot.clone());
-            *last_error = None;
-            let _ = events.send(MusicEvent::Snapshot(Some(NowPlaying { snapshot, cover })));
-        }
-        Err(error) => {
-            emit_error(events, last_error, format!("Чтение плеера: {error}"));
-        }
-    }
+    let statuses: Vec<_> = snapshots
+        .iter()
+        .map(|s| (s.player.clone(), s.playing))
+        .collect();
+    let selected = tidemark_mpris::model::preferred_player(current.as_ref(), &statuses);
+    let Some(snapshot) = snapshots
+        .into_iter()
+        .find(|s| Some(&s.player) == selected.as_ref())
+    else {
+        *current = None;
+        *last_snapshot = None;
+        artwork.reset();
+        let _ = events.send(MusicEvent::Snapshot(None));
+        emit_error(
+            events,
+            last_error,
+            format!(
+                "Не удалось прочитать плеер: {}",
+                first_error.unwrap_or_else(|| "плеер недоступен".into())
+            ),
+        );
+        return;
+    };
+    let cover = artwork.cover(&snapshot);
+    *current = Some(snapshot.player.clone());
+    *last_snapshot = Some(snapshot.clone());
+    *last_error = None;
+    let _ = events.send(MusicEvent::Snapshot(Some(NowPlaying { snapshot, cover })));
 }
 
 fn emit_error(events: &Sender<MusicEvent>, last_error: &mut Option<String>, message: String) {
