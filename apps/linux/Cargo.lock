@@ -1613,11 +1613,22 @@ dependencies = [
  "futures-lite",
  "gtk4",
  "libadwaita",
+ "libc",
+ "tidemark-agent",
  "tidemark-artwork",
  "tidemark-core",
  "tidemark-mpris",
  "tidemark-net",
  "zbus",
+]
+
+[[package]]
+name = "tidemark-agent"
+version = "1.3.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tidemark-core",
 ]
 
 [[package]]

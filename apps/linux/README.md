@@ -48,6 +48,30 @@ because transferring those states is not implemented. Ordinary smoke runs never
 start this worker. The protocol is covered by portable tests; native GTK and
 real GNOME lifecycle/placement acceptance are still required for this slice.
 
+## Local coding-agent cards
+
+Normal startup retains the `tidemark-agent` server at the validated private
+`$XDG_RUNTIME_DIR/tidemark/agent.sock` endpoint, using `/run/user/<uid>` when
+XDG runtime is unset. Startup never edits Claude/OpenCode settings or installs
+hooks. An unsafe or occupied endpoint leaves IPC unavailable and reports the
+error; the rest of the app keeps running.
+
+The GTK loop drains incoming cards without blocking. At most eight questions
+and eight notices are retained. Questions have FIFO priority; notices expire
+ten seconds after arrival, including while queued. Cancellation and the IPC
+client's timeout remove queued and visible questions. Closing a card, Escape,
+queue pressure and application shutdown return no choice, leaving the agent's
+terminal fallback intact. Only selecting an actual answer button returns its
+original zero-based index.
+
+Cards use plain GTK labels with markup and mnemonic processing disabled.
+Questions preserve supported 80-character titles and 160-character details
+exactly; oversized/unsupported cards return no answer. Buttons stay disabled
+until a real allocation confirms that the complete card fits. A card that
+would overflow the island falls back to the terminal without approving it.
+`--smoke-test` creates no IPC socket or hooks; it renders an inert synthetic
+question to `island-agent-card.png` with answer buttons disabled.
+
 ## Verification
 
 ```sh

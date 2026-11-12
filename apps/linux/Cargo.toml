@@ -17,6 +17,8 @@ futures-lite = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tidemark-net = { path = "../../crates/tidemark-net" }
+tidemark-agent = { path = "../../crates/tidemark-agent" }
+libc = "0.2"
 gtk = { package = "gtk4", version = "=0.9.7", features = ["v4_14"] }
 adw = { package = "libadwaita", version = "=0.7.2", features = ["v1_5"] }
 tidemark-mpris = { path = "../../crates/tidemark-mpris" }

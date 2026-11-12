@@ -31,6 +31,8 @@ pub struct Island {
     pub clipboard: Rc<ClipboardView>,
     pub text: TextView,
     pub stack: gtk::Stack,
+    pub agent: crate::ui::agent::AgentView,
+    agent_previous: Cell<Option<(bool, bool)>>,
     pub switcher: gtk::StackSwitcher,
     settings_button: gtk::Button,
     revealer: gtk::Revealer,
@@ -139,6 +141,8 @@ impl Island {
         stack.set_visible_child_name("home");
         switcher.set_stack(Some(&stack));
         expanded.append(&header);
+        let agent = crate::ui::agent::AgentView::build(shared.smoke);
+        expanded.append(&agent.root);
         expanded.append(&stack);
 
         let status = gtk::Label::new(Some(&shell_status()));
@@ -164,6 +168,8 @@ impl Island {
             clipboard,
             text,
             stack,
+            agent,
+            agent_previous: Cell::new(None),
             switcher,
             settings_button,
             revealer,
@@ -259,8 +265,12 @@ impl Island {
             keys.connect_key_pressed(move |_, key, _, _| {
                 if key == gtk::gdk::Key::Escape {
                     if let Some(island) = weak.upgrade() {
-                        island.pinned.set(false);
-                        island.collapse();
+                        if island.agent.dismiss() {
+                            island.pump_agent();
+                        } else {
+                            island.pinned.set(false);
+                            island.collapse();
+                        }
                     }
                     return glib::Propagation::Stop;
                 }
@@ -487,6 +497,22 @@ impl Island {
             region.num_rectangles()
         );
         Ok(())
+    }
+
+    pub fn pump_agent(&self) {
+        if self.agent.refresh() {
+            if self.agent_previous.get().is_none() {
+                self.agent_previous
+                    .set(Some((self.revealer.reveals_child(), self.pinned.get())));
+                self.pinned.set(true);
+                self.expand();
+            }
+        } else if let Some((expanded, pinned)) = self.agent_previous.take() {
+            self.pinned.set(pinned);
+            if !expanded {
+                self.collapse();
+            }
+        }
     }
 
     pub fn attach_shell(&self, service: shell::Service) {

@@ -1,5 +1,6 @@
 //! GTK4 + libadwaita views for the Linux island.
 
+pub mod agent;
 pub mod clipboard;
 pub mod control;
 pub mod home;

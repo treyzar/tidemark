@@ -7,3 +7,5 @@ pub mod clipboard;
 pub mod file_manager;
 pub mod music;
 pub mod shell;
+
+pub mod agent;

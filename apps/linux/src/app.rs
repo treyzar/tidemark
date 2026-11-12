@@ -29,6 +29,7 @@ struct AppState {
     island: RefCell<Option<Rc<Island>>>,
     music_rx: RefCell<Option<Receiver<MusicEvent>>>,
     smoke: bool,
+    agent: RefCell<Option<crate::services::agent::Service>>,
 }
 
 pub fn run(smoke: bool) {
@@ -56,8 +57,17 @@ pub fn run(smoke: bool) {
         island: RefCell::new(None),
         music_rx: RefCell::new(None),
         smoke,
+        agent: RefCell::new(None),
     });
 
+    {
+        let state = state.clone();
+        app.connect_shutdown(move |_| {
+            if let Some(agent) = state.agent.borrow_mut().take() {
+                agent.shutdown();
+            }
+        });
+    }
     {
         let state = state.clone();
         app.connect_activate(move |app| ensure_ui(app, &state));
@@ -138,6 +148,22 @@ fn ensure_ui(app: &adw::Application, state: &Rc<AppState>) {
         return;
     }
 
+    match crate::services::agent::Service::start() {
+        Ok(agent) => {
+            island.agent.attach(agent.clone());
+            state.agent.replace(Some(agent));
+            let weak = Rc::downgrade(&island);
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                let Some(island) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                island.pump_agent();
+                glib::ControlFlow::Continue
+            });
+        }
+        Err(error) => eprintln!("Tidemark agent IPC unavailable: {error}"),
+    }
+
     {
         let island = Rc::downgrade(&island);
         glib::timeout_add_local(Duration::from_secs(1), move || {
@@ -212,6 +238,17 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
                 }
                 render_png(&island.settings_root(window), &out_dir.join("settings.png"))?;
                 window.close();
+                island.agent.preview();
+            } else if step == model::TABS.len() + 2 {
+                island.check_geometry(true)?;
+                if !island.agent.root.is_visible() {
+                    return Err("agent preview did not render".into());
+                }
+                render_png(
+                    &island.root_widget(),
+                    &out_dir.join("island-agent-card.png"),
+                )?;
+                island.agent.clear();
                 island.collapse();
             } else {
                 island.check_geometry(false)?;

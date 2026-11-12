@@ -18,6 +18,11 @@ mod shell_protocol_tests;
 #[path = "services/online.rs"]
 mod translation_state_tests;
 
+#[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
+#[path = "services/agent.rs"]
+mod agent_queue_tests;
+
 #[cfg(target_os = "linux")]
 mod app;
 #[cfg(target_os = "linux")]
