@@ -190,7 +190,11 @@ fn ensure_ui(app: &adw::Application, state: &Rc<AppState>) {
         });
     }
     let (shell_tx, shell_rx) = mpsc::channel();
-    island.attach_shell(shell::spawn(shell_tx, island.launcher_enabled()));
+    island.attach_shell(shell::spawn(
+        shell_tx,
+        island.launcher_enabled(),
+        island.clipboard_history_enabled(),
+    ));
     let weak = Rc::downgrade(&island);
     glib::timeout_add_local(Duration::from_millis(100), move || {
         let Some(island) = weak.upgrade() else {
@@ -207,6 +211,7 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
     let out_dir = smoke_dir();
     let mut step = 0usize;
     let mut settings: Option<adw::PreferencesWindow> = None;
+    let mut capture_preview: Option<adw::ApplicationWindow> = None;
     // Every view receives real frames before allocation checks and rendering.
     glib::timeout_add_local(Duration::from_millis(400), move || {
         let result = (|| -> Result<bool, String> {
@@ -266,6 +271,32 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
                 render_png(&island.root_widget(), &out_dir.join("island-launcher.png"))?;
                 island.close_launcher(true);
                 island.collapse();
+                let image = tidemark_capture::Raster::from_rgba(
+                    400,
+                    240,
+                    [46u8, 111, 160, 255].repeat(400 * 240),
+                )
+                .map_err(|e| e.to_string())?;
+                let editor = crate::ui::capture::CaptureWindow::preview(
+                    &island
+                        .window
+                        .application()
+                        .and_then(|app| app.downcast::<adw::Application>().ok())
+                        .ok_or("missing GTK application")?,
+                    image,
+                );
+                editor.present();
+                capture_preview = Some(editor);
+            } else if step == model::TABS.len() + 4 {
+                let editor = capture_preview.as_ref().ok_or("missing capture preview")?;
+                if !editor.is_realized() {
+                    return Err("capture editor did not realize".into());
+                }
+                render_png(
+                    &editor.clone().upcast(),
+                    &out_dir.join("capture-editor.png"),
+                )?;
+                editor.close();
             } else {
                 island.check_geometry(false)?;
                 render_png(

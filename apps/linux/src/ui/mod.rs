@@ -1,6 +1,7 @@
 //! GTK4 + libadwaita views for the Linux island.
 
 pub mod agent;
+pub mod capture;
 pub mod clipboard;
 pub mod control;
 pub mod home;
@@ -33,6 +34,9 @@ pub struct Shared {
     pub music: MusicService,
     pub smoke: bool,
     pub shell_status: Rc<RefCell<String>>,
+    pub shell: Rc<RefCell<crate::services::shell::Service>>,
+    pub shell_peer: Rc<RefCell<Option<crate::services::shell::Peer>>>,
+    pub shell_caps: Rc<RefCell<Vec<tidemark_core::shell::Capability>>>,
     css: Rc<gtk::CssProvider>,
 }
 
@@ -53,6 +57,9 @@ impl Shared {
             music,
             smoke,
             shell_status: Rc::new(RefCell::new("GNOME: ожидание адаптера".into())),
+            shell: Rc::new(RefCell::new(crate::services::shell::Service::default())),
+            shell_peer: Rc::new(RefCell::new(None)),
+            shell_caps: Rc::new(RefCell::new(Vec::new())),
             css: Rc::new(gtk::CssProvider::new()),
         }
     }

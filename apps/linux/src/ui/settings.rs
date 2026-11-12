@@ -240,8 +240,17 @@ fn behaviour_page(shared: &Shared) -> adw::PreferencesPage {
         row.set_subtitle(subtitle);
         row.set_active(get(&shared.config.borrow()));
         let shared = shared.clone();
+        let clipboard_setting = title == "История буфера обмена";
         row.connect_active_notify(move |row| {
             set(&mut shared.config.borrow_mut(), row.is_active());
+            if clipboard_setting {
+                shared
+                    .shell
+                    .borrow()
+                    .send(crate::services::shell::Command::CaptureClipboard(
+                        row.is_active(),
+                    ));
+            }
             shared.save_config();
         });
         switches.add(&row);

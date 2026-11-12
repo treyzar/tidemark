@@ -8,6 +8,13 @@
 mod model;
 
 #[cfg(test)]
+#[path = "services/capture_state.rs"]
+#[allow(dead_code)]
+mod capture_state_tests;
+#[cfg(test)]
+#[path = "services/dock.rs"]
+mod dock_state_tests;
+#[cfg(test)]
 #[path = "services/home_online.rs"]
 mod home_online_tests;
 #[cfg(all(test, not(target_os = "linux")))]

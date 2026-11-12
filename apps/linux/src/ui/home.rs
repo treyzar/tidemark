@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+#[path = "dock.rs"]
+mod dock;
 #[path = "../services/yandex.rs"]
 mod favorites;
 #[path = "../services/home_online.rs"]
@@ -48,6 +50,7 @@ pub struct HomeView {
     status: gtk::Label,
     sleep_status: gtk::Label,
     tiles: gtk::Box,
+    dock: dock::DockView,
 }
 
 impl HomeView {
@@ -286,6 +289,7 @@ impl HomeView {
             ));
         }
 
+        let dock = dock::DockView::build(shared.clone());
         let view = Self {
             root,
             shared,
@@ -315,6 +319,7 @@ impl HomeView {
             status,
             sleep_status,
             tiles,
+            dock,
         };
         view.refresh_tiles();
         view.tick_online();
@@ -740,6 +745,12 @@ impl HomeView {
         title.set_xalign(0.0);
         title.add_css_class("tile-title");
         tile.append(&title);
+
+        if id == "apps" {
+            self.dock.refresh();
+            tile.append(&self.dock.root);
+            return tile;
+        }
 
         let value = match id {
             "media" => self

@@ -1,7 +1,7 @@
 //! Control tab: a real countdown timer plus honest status for desktop
 //! features whose GNOME bridge is not wired into this build yet.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,9 @@ use gtk::prelude::*;
 use tidemark_core::timer::{self, State};
 
 use crate::model;
+use crate::services::shell::{Command, Peer};
 use crate::ui::{card, muted, page_header, section_title, text_button, Shared};
+use tidemark_core::shell::{Capability, FocusInfo, ShellError, WindowAction, WindowState};
 
 pub struct ControlView {
     pub root: gtk::Box,
@@ -18,6 +20,14 @@ pub struct ControlView {
     state: gtk::Label,
     bridge_status: gtk::Label,
     preset: Rc<Cell<u64>>,
+    window_controls: Vec<gtk::Widget>,
+    window_gate: gtk::Box,
+    window_title: gtk::Label,
+    window_status: gtk::Label,
+    above: gtk::Button,
+    opacity: gtk::SpinButton,
+    target: Rc<RefCell<Option<(Peer, FocusInfo)>>>,
+    pending: Rc<RefCell<Option<(u64, Peer, u64)>>>,
 }
 
 impl ControlView {
@@ -102,24 +112,120 @@ impl ControlView {
         root.append(&timer_card);
 
         let window_card = card();
-        window_card.append(&section_title("Окно и система"));
-        window_card.append(&muted(
-            "Состояние GNOME показано ниже. Управление чужими окнами, захват экрана \
-             и поиск ещё не подключены; кнопки этих действий выключены.",
-        ));
-        for label in [
-            "Поверх всех окон",
-            "Половина экрана",
-            "Прозрачность окна",
-            "Снимок экрана и OCR",
-            "Поиск приложений по Alt+Space",
-        ] {
+        window_card.append(&section_title("Последнее активное окно"));
+        let window_title = muted("GNOME не подключён или внешнее окно не выбрано.");
+        window_title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        window_card.append(&window_title);
+        let window_status = muted("Действия доступны после подтверждённого подключения GNOME.");
+        let target = Rc::new(RefCell::new(None::<(Peer, FocusInfo)>));
+        let pending = Rc::new(RefCell::new(None::<(u64, Peer, u64)>));
+        let serial = Rc::new(Cell::new(0u64));
+        let buttons = gtk::FlowBox::new();
+        buttons.set_selection_mode(gtk::SelectionMode::None);
+        buttons.set_min_children_per_line(1);
+        buttons.set_max_children_per_line(2);
+        buttons.set_column_spacing(6);
+        buttons.set_row_spacing(6);
+        let mut window_controls: Vec<gtk::Widget> = Vec::new();
+        let above = text_button("Поверх всех окон");
+        let opacity = gtk::SpinButton::with_range(10.0, 100.0, 5.0);
+        opacity.set_value(100.0);
+        let actions = [
+            ("Активировать", WindowAction::Activate),
+            ("Свернуть", WindowAction::Minimize),
+            ("Развернуть / восстановить", WindowAction::ToggleMaximize),
+            ("Левая половина", WindowAction::TileLeft),
+            ("Правая половина", WindowAction::TileRight),
+        ];
+        for (label, action) in actions {
             let button = text_button(label);
+            let shared = shared.clone();
+            let target = target.clone();
+            let pending = pending.clone();
+            let serial = serial.clone();
+            let status = window_status.clone();
+            let gate = window_card.clone();
+            button.connect_clicked(move |_| {
+                submit_window(&shared, &target, &pending, &serial, &status, &gate, action);
+            });
             button.set_sensitive(false);
-            button.set_tooltip_text(Some("Действие ещё не подключено в этой сборке."));
-            window_card.append(&button);
+            window_controls.push(button.clone().upcast());
+            buttons.insert(&button, -1);
         }
+        {
+            let shared = shared.clone();
+            let target = target.clone();
+            let pending = pending.clone();
+            let serial = serial.clone();
+            let status = window_status.clone();
+            let gate = window_card.clone();
+            above.connect_clicked(move |_| {
+                let on = target.borrow().as_ref().map(|(_, focus)| !focus.above);
+                if let Some(on) = on {
+                    submit_window(
+                        &shared,
+                        &target,
+                        &pending,
+                        &serial,
+                        &status,
+                        &gate,
+                        WindowAction::SetAbove(on),
+                    );
+                }
+            });
+        }
+        above.set_sensitive(false);
+        window_controls.push(above.clone().upcast());
+        buttons.insert(&above, -1);
+        window_card.append(&buttons);
+        let opacity_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let opacity_label = muted("Прозрачность, %");
+        opacity_label.set_hexpand(true);
+        opacity_row.append(&opacity_label);
+        opacity.set_sensitive(false);
+        window_controls.push(opacity.clone().upcast());
+        opacity_row.append(&opacity);
+        let apply = text_button("Применить");
+        {
+            let shared = shared.clone();
+            let target = target.clone();
+            let pending = pending.clone();
+            let serial = serial.clone();
+            let status = window_status.clone();
+            let opacity = opacity.clone();
+            let gate = window_card.clone();
+            apply.connect_clicked(move |_| {
+                submit_window(
+                    &shared,
+                    &target,
+                    &pending,
+                    &serial,
+                    &status,
+                    &gate,
+                    WindowAction::SetOpacity(
+                        (opacity.value() * 255.0 / 100.0).round().clamp(26.0, 255.0) as u8,
+                    ),
+                );
+            });
+        }
+        apply.set_sensitive(false);
+        window_controls.push(apply.clone().upcast());
+        opacity_row.append(&apply);
+        window_card.append(&opacity_row);
+        window_card.append(&window_status);
         root.append(&window_card);
+
+        let capture = text_button("Снимок экрана · OCR / QR");
+        capture.set_sensitive(!shared.smoke);
+        let smoke = shared.smoke;
+        capture.connect_clicked(move |_| {
+            if let Some(app) = gtk::gio::Application::default()
+                .and_then(|app| app.downcast::<adw::Application>().ok())
+            {
+                crate::ui::capture::CaptureWindow::build(&app, smoke).present();
+            }
+        });
+        root.append(&capture);
 
         let status_card = card();
         status_card.append(&section_title("Состояние Linux-версии"));
@@ -131,7 +237,7 @@ impl ControlView {
             "Музыка: реальный MPRIS-воркер в отдельном потоке."
         }));
         status_card.append(&muted(
-            "Буфер обмена: чтение только при фокусе, ручное добавление.",
+            "Буфер: фоновая текстовая история через GNOME; ручное добавление при фокусе без него.",
         ));
         status_card.append(&muted("Док приложений пока недоступен в этой сборке."));
         root.append(&status_card);
@@ -147,7 +253,101 @@ impl ControlView {
             state,
             bridge_status,
             preset,
+            window_controls,
+            window_gate: window_card,
+            window_title,
+            window_status,
+            above,
+            opacity,
+            target,
+            pending,
         }
+    }
+
+    pub fn set_window_context(
+        &self,
+        peer: Option<Peer>,
+        focus: Option<FocusInfo>,
+        supported: bool,
+    ) {
+        let next = peer.zip(focus);
+        let changed = self
+            .target
+            .borrow()
+            .as_ref()
+            .map(|(p, f)| (p.clone(), f.id))
+            != next.as_ref().map(|(p, f)| (p.clone(), f.id));
+        self.target.replace(next);
+        if changed {
+            self.pending.borrow_mut().take();
+        }
+        self.update_window(supported);
+    }
+    fn update_window(&self, supported: bool) {
+        let target = self.target.borrow();
+        if let Some((_, focus)) = target.as_ref() {
+            self.window_title.set_text(&format!(
+                "{} · {}",
+                focus.app_id,
+                focus.title.chars().take(120).collect::<String>()
+            ));
+            self.above.set_label(if focus.above {
+                "Снять закрепление"
+            } else {
+                "Поверх всех окон"
+            });
+            self.opacity
+                .set_value(f64::from(focus.opacity) * 100.0 / 255.0);
+        } else {
+            self.window_title
+                .set_text("Нет подтверждённого внешнего окна.");
+        }
+        let ready =
+            supported && target.is_some() && self.pending.borrow().is_none() && !self.shared.smoke;
+        for control in &self.window_controls {
+            control.set_sensitive(ready);
+        }
+        if !supported {
+            self.window_status
+                .set_text("Управление окнами недоступно без поддерживающего адаптера GNOME.");
+        }
+    }
+    pub fn handle_window_result(
+        &self,
+        request: u64,
+        peer: Peer,
+        id: u64,
+        result: Result<WindowState, ShellError>,
+    ) {
+        if self.pending.borrow().as_ref() != Some(&(request, peer.clone(), id)) {
+            return;
+        }
+        self.pending.borrow_mut().take();
+        if let Some((current, focus)) = self.target.borrow_mut().as_mut() {
+            if current == &peer && focus.id == id {
+                match result {
+                    Ok(state) => {
+                        focus.above = state.above;
+                        focus.maximized = state.maximized;
+                        focus.opacity = state.opacity;
+                        self.window_status.set_text(if state.minimized {
+                            "GNOME подтвердил: окно свёрнуто."
+                        } else {
+                            "Состояние окна подтверждено GNOME."
+                        });
+                    }
+                    Err(error) => self
+                        .window_status
+                        .set_text(&format!("Действие не подтверждено: {error}")),
+                }
+            }
+        }
+        self.update_window(
+            self.shared
+                .shell_caps
+                .borrow()
+                .contains(&Capability::WindowActions),
+        );
     }
 
     /// Called once per second. Returns true on the tick where the countdown
@@ -178,5 +378,45 @@ impl ControlView {
 
     pub fn preset_minutes(&self) -> u64 {
         self.preset.get()
+    }
+}
+
+fn submit_window(
+    shared: &Shared,
+    target: &Rc<RefCell<Option<(Peer, FocusInfo)>>>,
+    pending: &Rc<RefCell<Option<(u64, Peer, u64)>>>,
+    serial: &Cell<u64>,
+    status: &gtk::Label,
+    gate: &gtk::Box,
+    action: WindowAction,
+) {
+    if shared.smoke || pending.borrow().is_some() {
+        return;
+    }
+    let Some((peer, focus)) = target.borrow().clone() else {
+        return;
+    };
+    if shared.shell_peer.borrow().as_ref() != Some(&peer)
+        || !shared
+            .shell_caps
+            .borrow()
+            .contains(&Capability::WindowActions)
+    {
+        status.set_text("GNOME изменился; выберите окно заново.");
+        return;
+    }
+    let request = serial.get().wrapping_add(1);
+    serial.set(request);
+    if shared.shell.borrow().send(Command::Window {
+        request,
+        peer: peer.clone(),
+        id: focus.id,
+        action,
+    }) {
+        pending.replace(Some((request, peer, focus.id)));
+        gate.set_sensitive(false);
+        status.set_text("Ожидаем подтверждения GNOME…");
+    } else {
+        status.set_text("Мост GNOME занят; действие не отправлено.");
     }
 }

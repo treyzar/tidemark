@@ -2,7 +2,7 @@
 //! this page can always add the text currently in the clipboard while the
 //! island has focus, and it never pretends that a failed operation worked.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use gtk::gdk;
@@ -11,8 +11,10 @@ use gtk::glib::prelude::ToValue;
 use gtk::prelude::*;
 use tidemark_core::clip_history::{self, Entry, Glyph};
 
+use crate::services::shell::{Command, Peer, ReadKey};
 use crate::services::{clipboard as clipboard_service, file_manager};
 use crate::ui::{card, icon_button, muted, page_header, scroll, text_button, Shared};
+use tidemark_core::shell::{Capability, ShellError};
 
 pub struct ClipboardView {
     pub root: gtk::Box,
@@ -21,6 +23,10 @@ pub struct ClipboardView {
     status: gtk::Label,
     add: gtk::Button,
     clear: gtk::Button,
+    mode: gtk::Label,
+    offer: RefCell<Option<ReadKey>>,
+    write_serial: Cell<u64>,
+    pending_write: RefCell<Option<(u64, Peer)>>,
     me: RefCell<Option<Weak<Self>>>,
 }
 
@@ -33,13 +39,9 @@ impl ClipboardView {
             Some("Текст, картинки и файлы, сохранённые локально"),
         ));
 
-        let history_on = shared.config.borrow().clipboard_history;
-        root.append(&muted(if history_on {
-            "Фоновая история требует адаптера GNOME Shell. Пока остров в фокусе, текст \
-             можно добавить вручную."
-        } else {
-            "История выключена в настройках. Добавлять текст вручную всё равно можно."
-        }));
+        let mode =
+            muted("Подключение фоновой истории GNOME… Ручное добавление доступно при фокусе.");
+        root.append(&mode);
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let add = text_button("Добавить текущий текст");
@@ -65,6 +67,10 @@ impl ClipboardView {
             status,
             add,
             clear,
+            mode,
+            offer: RefCell::new(None),
+            write_serial: Cell::new(0),
+            pending_write: RefCell::new(None),
             me: RefCell::new(None),
         });
         view.me.replace(Some(Rc::downgrade(&view)));
@@ -90,7 +96,82 @@ impl ClipboardView {
     }
 
     pub fn refresh(&self) {
+        self.update_mode();
         self.rebuild();
+    }
+    fn update_mode(&self) {
+        self.mode
+            .set_text(if !self.shared.config.borrow().clipboard_history {
+                "Фоновая история выключена. Текст можно добавить вручную при фокусе."
+            } else if self.shared.shell_peer.borrow().is_some()
+                && self
+                    .shared
+                    .shell_caps
+                    .borrow()
+                    .contains(&Capability::ClipboardRead)
+            {
+                "Фоновая текстовая история подключена к GNOME. Секретные данные не читаются."
+            } else {
+                "GNOME не подключён: только ручное добавление текста при фокусе."
+            });
+    }
+    pub fn context_changed(&self) {
+        self.offer.borrow_mut().take();
+        self.pending_write.borrow_mut().take();
+        self.list.set_sensitive(true);
+        self.update_mode();
+    }
+    pub fn offer_changed(&self, key: Option<ReadKey>, sensitive: bool) {
+        self.offer.replace(key);
+        self.update_mode();
+        if sensitive {
+            self.set_status("Секретное содержимое не читается и не сохраняется.", false);
+        }
+    }
+    pub fn receive_text(&self, key: ReadKey, text: String) {
+        if self.shared.smoke
+            || !self.shared.config.borrow().clipboard_history
+            || !self
+                .shared
+                .shell_caps
+                .borrow()
+                .contains(&Capability::ClipboardRead)
+            || self.offer.borrow().as_ref() != Some(&key)
+            || self.shared.shell_peer.borrow().as_ref() != Some(&key.peer)
+        {
+            return;
+        }
+        let dropped = self
+            .shared
+            .clip
+            .borrow_mut()
+            .push(Entry::Text { text }, Shared::now_secs());
+        let saved = self.shared.clip.borrow().save_to(&clip_history::dir());
+        self.rebuild();
+        match saved {
+            Ok(()) => {
+                delete_images(&dropped);
+                self.set_status("Текст из GNOME добавлен в историю.", false);
+            }
+            Err(error) => self.set_status(
+                &format!("Текст только в памяти: не удалось сохранить историю: {error}"),
+                true,
+            ),
+        }
+    }
+    pub fn written(&self, request: u64, peer: Peer, result: Result<(), ShellError>) {
+        if self.pending_write.borrow().as_ref() != Some(&(request, peer.clone())) {
+            return;
+        }
+        self.pending_write.borrow_mut().take();
+        self.list.set_sensitive(true);
+        if self.shared.shell_peer.borrow().as_ref() != Some(&peer) {
+            return;
+        }
+        match result {
+            Ok(()) => self.set_status("GNOME подтвердил запись текста в буфер.", false),
+            Err(error) => self.set_status(&format!("Запись не подтверждена: {error}"), true),
+        }
     }
 
     fn add_current(&self, text: Option<String>) {
@@ -98,6 +179,10 @@ impl ClipboardView {
             self.set_status("Не удалось прочитать буфер обмена.", true);
             return;
         };
+        if text.chars().count() > clip_history::MAX_TEXT_CHARS {
+            self.set_status("Текст превышает допустимый размер истории.", true);
+            return;
+        }
         if text.trim().is_empty() {
             self.set_status("В буфере нет текста.", true);
             return;
@@ -148,7 +233,7 @@ impl ClipboardView {
         }
     }
 
-    fn row(&self, index: usize, item: &clip_history::Item, now: u64) -> gtk::Box {
+    fn row(&self, _index: usize, item: &clip_history::Item, now: u64) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.add_css_class("tidemark-row");
 
@@ -184,9 +269,12 @@ impl ClipboardView {
 
         let copy = icon_button("edit-copy-symbolic", "Скопировать");
         let weak = self.weak();
+        let entry = item.entry.clone();
         copy.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.copy(index);
+                if let Some(index) = view.index_of(&entry) {
+                    view.copy(index);
+                }
             }
         });
         row.append(&copy);
@@ -204,9 +292,12 @@ impl ClipboardView {
             },
         );
         let weak = self.weak();
+        let entry = item.entry.clone();
         pin.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.toggle_pin(index);
+                if let Some(index) = view.index_of(&entry) {
+                    view.toggle_pin(index);
+                }
             }
         });
         row.append(&pin);
@@ -214,9 +305,12 @@ impl ClipboardView {
         if matches!(item.entry, Entry::Files { .. }) {
             let reveal = icon_button("folder-open-symbolic", "Показать в папке");
             let weak = self.weak();
+            let entry = item.entry.clone();
             reveal.connect_clicked(move |_| {
                 if let Some(view) = weak.upgrade() {
-                    view.reveal(index);
+                    if let Some(index) = view.index_of(&entry) {
+                        view.reveal(index);
+                    }
                 }
             });
             row.append(&reveal);
@@ -224,9 +318,12 @@ impl ClipboardView {
 
         let remove = icon_button("user-trash-symbolic", "Удалить запись");
         let weak = self.weak();
+        let entry = item.entry.clone();
         remove.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.remove(index);
+                if let Some(index) = view.index_of(&entry) {
+                    view.remove(index);
+                }
             }
         });
         row.append(&remove);
@@ -234,6 +331,14 @@ impl ClipboardView {
         row
     }
 
+    fn index_of(&self, entry: &Entry) -> Option<usize> {
+        self.shared
+            .clip
+            .borrow()
+            .items
+            .iter()
+            .position(|item| &item.entry == entry)
+    }
     fn weak(&self) -> Weak<Self> {
         self.me
             .borrow()
@@ -255,6 +360,30 @@ impl ClipboardView {
         };
         match entry {
             Entry::Text { text } => {
+                if self.shared.smoke || self.pending_write.borrow().is_some() {
+                    return;
+                }
+                if let Some(peer) = self.shared.shell_peer.borrow().clone().filter(|_| {
+                    self.shared
+                        .shell_caps
+                        .borrow()
+                        .contains(&Capability::ClipboardWrite)
+                }) {
+                    let request = self.write_serial.get().wrapping_add(1);
+                    self.write_serial.set(request);
+                    if self.shared.shell.borrow().send(Command::SetClipboard {
+                        request,
+                        peer: peer.clone(),
+                        text,
+                    }) {
+                        self.pending_write.replace(Some((request, peer)));
+                        self.list.set_sensitive(false);
+                        self.set_status("Ожидаем подтверждения записи GNOME…", false);
+                    } else {
+                        self.set_status("Мост GNOME занят; текст не отправлен.", true);
+                    }
+                    return;
+                }
                 if clipboard_service::write_text(&text) {
                     self.set_status("Текст скопирован.", false);
                 } else {

@@ -79,11 +79,32 @@ use std::time::Duration;
 use tidemark_core::shell::{FocusInfo, Rect, ShellError, ShortcutId, SHELL_CONTRACT_VERSION};
 use zbus::zvariant::{OwnedValue, Structure};
 
+#[path = "shell_state.rs"]
+pub mod state;
+pub use state::{Peer, ReadKey};
+use tidemark_core::shell::{ClipboardOffer, WindowAction, WindowState};
+
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum Event {
-    Connected(Vec<Capability>),
+    Connected(Vec<Capability>, Peer),
+    ClipboardOffer {
+        offer: ClipboardOffer,
+        key: Option<ReadKey>,
+    },
+    ClipboardText(ReadKey, String),
+    ClipboardWritten {
+        request: u64,
+        peer: Peer,
+        result: Result<(), ShellError>,
+    },
+    WindowResult {
+        request: u64,
+        peer: Peer,
+        id: u64,
+        result: Result<WindowState, ShellError>,
+    },
     Disconnected(String),
     NeedsHandover,
     HandoverAccepted,
@@ -103,6 +124,18 @@ pub enum Command {
     Place(Rect),
     Handover,
     Shortcuts(bool),
+    CaptureClipboard(bool),
+    Window {
+        request: u64,
+        peer: Peer,
+        id: u64,
+        action: WindowAction,
+    },
+    SetClipboard {
+        request: u64,
+        peer: Peer,
+        text: String,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -115,16 +148,29 @@ impl Service {
     }
 }
 
-pub fn spawn(events: Sender<Event>, mut launcher_enabled: bool) -> Service {
+pub fn spawn(
+    events: Sender<Event>,
+    mut launcher_enabled: bool,
+    mut clipboard_enabled: bool,
+) -> Service {
     let (tx, rx) = mpsc::sync_channel(16);
     let worker_events = events.clone();
     let result = std::thread::Builder::new()
         .name("tidemark-shell".into())
         .spawn(move || {
             let events = worker_events;
+            let mut generation = 0u64;
             async_io::block_on(async move {
                 loop {
-                    if let Err(error) = session(&events, &rx, &mut launcher_enabled).await {
+                    if let Err(error) = session(
+                        &events,
+                        &rx,
+                        &mut launcher_enabled,
+                        &mut clipboard_enabled,
+                        &mut generation,
+                    )
+                    .await
+                    {
                         if events.send(Event::Disconnected(error.to_string())).is_err() {
                             return;
                         }
@@ -153,6 +199,8 @@ async fn session(
     events: &Sender<Event>,
     commands: &Receiver<Command>,
     launcher_enabled: &mut bool,
+    clipboard_enabled: &mut bool,
+    generation: &mut u64,
 ) -> zbus::Result<()> {
     let connect = async {
         zbus::connection::Builder::session()?
@@ -194,13 +242,21 @@ async fn session(
         .call("GetNameOwner", &(BUS_NAME,))
         .await
         .unwrap_or_default();
+    *generation = generation.wrapping_add(1);
     let mut authenticated = false;
+    let mut clipboard = state::ClipboardGuard::default();
+    clipboard.enable(*clipboard_enabled);
+    let (read_tx, read_rx) = mpsc::sync_channel::<(ReadKey, Result<String, ShellError>)>(1);
+    let mut reading = false;
+    let mut attempted: Option<ReadKey> = None;
+    let mut pending_owner = None;
     let mut latest_place = None;
     let mut handover_pending = false;
     let mut state_check = std::time::Instant::now();
     let mut previous_state = String::new();
     if !owner.is_empty() {
-        authenticated = authenticate(&connection, &owner, events, *launcher_enabled).await;
+        authenticated =
+            authenticate(&connection, &owner, events, *launcher_enabled, *generation).await;
     } else {
         let _ = events.send(Event::Disconnected("Адаптер GNOME не найден".into()));
     }
@@ -211,28 +267,41 @@ async fn session(
             Owner(Option<zbus::Result<zbus::Message>>),
             Tick,
         }
-        let wake = future::or(
-            future::or(async { Wake::Owner(owners.next().await) }, async {
-                Wake::Signal(signals.next().await)
-            }),
-            async {
-                async_io::Timer::after(Duration::from_millis(100)).await;
-                Wake::Tick
-            },
-        )
-        .await;
+        let wake = if let Some(message) = pending_owner.take() {
+            Wake::Owner(Some(Ok(message)))
+        } else {
+            future::or(
+                future::or(async { Wake::Owner(owners.next().await) }, async {
+                    Wake::Signal(signals.next().await)
+                }),
+                async {
+                    async_io::Timer::after(Duration::from_millis(100)).await;
+                    Wake::Tick
+                },
+            )
+            .await
+        };
         match wake {
             Wake::Owner(Some(Ok(message))) => {
                 let (name, _old, next): (String, String, String) = message.body().deserialize()?;
                 if name == BUS_NAME && next != owner {
                     owner = next;
+                    *generation = generation.wrapping_add(1);
+                    clipboard.invalidate();
+                    attempted = None;
                     authenticated = false;
                     previous_state.clear();
                     let _ =
                         events.send(Event::Disconnected("Адаптер GNOME переподключается".into()));
                     if !owner.is_empty() {
-                        authenticated =
-                            authenticate(&connection, &owner, events, *launcher_enabled).await;
+                        authenticated = authenticate(
+                            &connection,
+                            &owner,
+                            events,
+                            *launcher_enabled,
+                            *generation,
+                        )
+                        .await;
                         if authenticated {
                             if let Some(rect) = latest_place {
                                 place(&connection, &owner, rect, events).await;
@@ -242,24 +311,15 @@ async fn session(
                 }
             }
             Wake::Signal(Some(Ok(message))) => {
-                let header = message.header();
-                // Shell1 state must come from this exact owner and be unicast
-                // to this connection. Discard stale or forged broadcast state.
-                if authenticated
-                    && header.sender().map(|v| v.as_str()) == Some(owner.as_str())
-                    && header.destination().map(|v| v.as_str())
-                        == connection.unique_name().map(|v| v.as_str())
-                {
-                    match decode_signal(&message) {
-                        Ok(Some(event)) => {
-                            let _ = events.send(event);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let _ = events.send(Event::Error(ShellError::Failed(error)));
-                        }
-                    }
-                }
+                dispatch_signal(
+                    &message,
+                    authenticated,
+                    &owner,
+                    *generation,
+                    &connection,
+                    events,
+                    &mut clipboard,
+                );
             }
             Wake::Signal(Some(Err(error))) | Wake::Owner(Some(Err(error))) => return Err(error),
             Wake::Signal(None) | Wake::Owner(None) => {
@@ -269,8 +329,135 @@ async fn session(
             }
             Wake::Tick => {}
         }
+        let mut drained = 0;
+        while let Some(message) = future::poll_once(signals.next()).await {
+            match message {
+                Some(Ok(message)) => dispatch_signal(
+                    &message,
+                    authenticated,
+                    &owner,
+                    *generation,
+                    &connection,
+                    events,
+                    &mut clipboard,
+                ),
+                Some(Err(error)) => return Err(error),
+                None => return Err(zbus::Error::Failure("GNOME signal stream ended".into())),
+            }
+            drained += 1;
+            if drained >= 128 {
+                break;
+            }
+        }
+        if drained >= 128 {
+            continue;
+        }
+        if let Some(message) = future::poll_once(owners.next()).await {
+            match message {
+                Some(Ok(message)) => {
+                    pending_owner = Some(message);
+                    continue;
+                }
+                Some(Err(error)) => return Err(error),
+                None => return Ok(()),
+            }
+        }
+        if let Ok((key, result)) = read_rx.try_recv() {
+            reading = false;
+            if clipboard.accepts(&key) && key.peer.matches(&owner, *generation) && authenticated {
+                match result {
+                    Ok(text) => {
+                        let _ = events.send(Event::ClipboardText(key, text));
+                    }
+                    Err(error) => {
+                        let _ = events.send(Event::Error(error));
+                    }
+                }
+            }
+        }
+        if !reading && authenticated && !handover_pending {
+            if let Some(key) = clipboard
+                .current()
+                .filter(|key| attempted.as_ref() != Some(key))
+            {
+                let tx = read_tx.clone();
+                let conn = connection.clone();
+                let task_key = key.clone();
+                match std::thread::Builder::new()
+                    .name("tidemark-clipboard-read".into())
+                    .spawn(move || {
+                        let result = async_io::block_on(read_clipboard(&conn, &task_key));
+                        let _ = tx.try_send((task_key, result));
+                    }) {
+                    Ok(_) => {
+                        reading = true;
+                        attempted = Some(key);
+                    }
+                    Err(error) => {
+                        attempted = Some(key);
+                        let _ = events.send(Event::Error(ShellError::Failed(error.to_string())));
+                    }
+                }
+            }
+        }
         loop {
+            // Prioritize bus ownership transitions over queued user mutations,
+            // including release/reacquire by the SAME unique owner.
+            if let Some(message) = future::poll_once(owners.next()).await {
+                match message {
+                    Some(Ok(message)) => {
+                        pending_owner = Some(message);
+                        break;
+                    }
+                    Some(Err(error)) => return Err(error),
+                    None => return Ok(()),
+                }
+            }
             match commands.try_recv() {
+                Ok(Command::CaptureClipboard(enabled)) => {
+                    *clipboard_enabled = enabled;
+                    clipboard.enable(enabled);
+                }
+                Ok(Command::Window {
+                    request,
+                    peer,
+                    id,
+                    action,
+                }) => {
+                    let result = if authenticated
+                        && !handover_pending
+                        && peer.matches(&owner, *generation)
+                    {
+                        mutate_window(&connection, &bus, &peer, id, action).await
+                    } else {
+                        Err(stale_peer())
+                    };
+                    let _ = events.send(Event::WindowResult {
+                        request,
+                        peer,
+                        id,
+                        result,
+                    });
+                }
+                Ok(Command::SetClipboard {
+                    request,
+                    peer,
+                    text,
+                }) => {
+                    let result = if authenticated
+                        && !handover_pending
+                        && peer.matches(&owner, *generation)
+                    {
+                        write_clipboard(&connection, &bus, &peer, &text).await
+                    } else {
+                        Err(stale_peer())
+                    };
+                    let _ = events.send(Event::ClipboardWritten {
+                        request,
+                        peer,
+                        result,
+                    });
+                }
                 Ok(Command::Shortcuts(enabled)) => {
                     if *launcher_enabled != enabled {
                         *launcher_enabled = enabled;
@@ -333,6 +520,7 @@ async fn authenticate(
     owner: &str,
     events: &Sender<Event>,
     launcher_enabled: bool,
+    generation: u64,
 ) -> bool {
     if !launched_by_adapter() {
         return false;
@@ -355,7 +543,13 @@ async fn authenticate(
                 "GNOME owner changed during Hello".into(),
             ));
         }
-        let _ = events.send(Event::Connected(caps.clone()));
+        let _ = events.send(Event::Connected(
+            caps.clone(),
+            Peer {
+                owner: owner.into(),
+                generation,
+            },
+        ));
         // Additive v1 property: older adapters can still place and track state,
         // but cannot enable primary-only fullscreen hiding without this value.
         if let Ok(primary) = proxy.get_property::<u32>("PrimaryMonitor").await {
@@ -378,6 +572,135 @@ async fn authenticate(
             false
         }
     }
+}
+
+fn stale_peer() -> ShellError {
+    ShellError::Failed("GNOME изменился; действие отменено. Выберите окно заново.".into())
+}
+fn dispatch_signal(
+    message: &zbus::Message,
+    authenticated: bool,
+    owner: &str,
+    generation: u64,
+    connection: &zbus::Connection,
+    events: &Sender<Event>,
+    clipboard: &mut state::ClipboardGuard,
+) {
+    let header = message.header();
+    if !authenticated
+        || header.sender().map(|v| v.as_str()) != Some(owner)
+        || header.destination().map(|v| v.as_str()) != connection.unique_name().map(|v| v.as_str())
+    {
+        return;
+    }
+    match decode_signal(message) {
+        Ok(Some(mut event)) => {
+            if let Event::ClipboardOffer { offer, key } = &mut event {
+                *key = clipboard.offer(
+                    &Peer {
+                        owner: owner.into(),
+                        generation,
+                    },
+                    offer,
+                );
+            }
+            let _ = events.send(event);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = events.send(Event::Error(ShellError::Failed(error)));
+        }
+    }
+}
+async fn verify_owner(bus: &zbus::Proxy<'_>, peer: &Peer) -> Result<(), ShellError> {
+    let live: String = bus
+        .call("GetNameOwner", &(BUS_NAME,))
+        .await
+        .map_err(map_error)?;
+    if live != peer.owner {
+        return Err(stale_peer());
+    }
+    Ok(())
+}
+fn action_wire(action: WindowAction) -> Result<(&'static str, OwnedValue), ShellError> {
+    Ok(match action {
+        WindowAction::Activate => ("activate", 0u8.into()),
+        WindowAction::Minimize => ("minimize", 0u8.into()),
+        WindowAction::ToggleMaximize => ("toggle_maximize", 0u8.into()),
+        WindowAction::TileLeft => ("tile_left", 0u8.into()),
+        WindowAction::TileRight => ("tile_right", 0u8.into()),
+        WindowAction::SetAbove(on) => ("set_above", on.into()),
+        WindowAction::SetOpacity(value) if value >= 26 => ("set_opacity", value.into()),
+        WindowAction::SetOpacity(_) => {
+            return Err(ShellError::Failed("Недопустимая прозрачность окна".into()))
+        }
+    })
+}
+async fn mutate_window(
+    connection: &zbus::Connection,
+    bus: &zbus::Proxy<'_>,
+    peer: &Peer,
+    id: u64,
+    action: WindowAction,
+) -> Result<WindowState, ShellError> {
+    let (action, arg) = action_wire(action)?;
+    verify_owner(bus, peer).await?;
+    let proxy = zbus::Proxy::new(connection, peer.owner.as_str(), OBJECT_PATH, INTERFACE)
+        .await
+        .map_err(map_error)?;
+    let dict: HashMap<String, OwnedValue> = proxy
+        .call("WindowAction", &(id, action, arg))
+        .await
+        .map_err(map_error)?;
+    decode_window_state(dict).map_err(ShellError::Failed)
+}
+pub fn decode_window_state(mut dict: HashMap<String, OwnedValue>) -> Result<WindowState, String> {
+    let state = WindowState {
+        maximized: take(&mut dict, "maximized")?,
+        above: take(&mut dict, "above")?,
+        opacity: take(&mut dict, "opacity")?,
+        minimized: take(&mut dict, "minimized")?,
+    };
+    if !dict.is_empty() {
+        return Err("unexpected window state field".into());
+    }
+    Ok(state)
+}
+async fn read_clipboard(
+    connection: &zbus::Connection,
+    key: &ReadKey,
+) -> Result<String, ShellError> {
+    let proxy = zbus::Proxy::new(connection, key.peer.owner.as_str(), OBJECT_PATH, INTERFACE)
+        .await
+        .map_err(map_error)?;
+    let message = proxy
+        .call_method("GetClipboard", &(key.mime.as_str(),))
+        .await
+        .map_err(map_error)?;
+    let body = message.body();
+    let (bytes,): (&[u8],) = body
+        .deserialize()
+        .map_err(|error| ShellError::Failed(error.to_string()))?;
+    state::text(bytes).map_err(ShellError::Failed)
+}
+async fn write_clipboard(
+    connection: &zbus::Connection,
+    bus: &zbus::Proxy<'_>,
+    peer: &Peer,
+    text: &str,
+) -> Result<(), ShellError> {
+    state::text(text.as_bytes()).map_err(ShellError::Failed)?;
+    verify_owner(bus, peer).await?;
+    let proxy = zbus::Proxy::new(connection, peer.owner.as_str(), OBJECT_PATH, INTERFACE)
+        .await
+        .map_err(map_error)?;
+    proxy
+        .call::<_, _, ()>(
+            "SetClipboard",
+            &("text/plain;charset=utf-8", text.as_bytes()),
+        )
+        .await
+        .map_err(map_error)
 }
 
 fn shortcut_bindings(launcher_enabled: bool) -> Vec<(&'static str, &'static str)> {
@@ -546,6 +869,13 @@ fn decode_signal(message: &zbus::Message) -> Result<Option<Event>, String> {
     let member = header.member().map(|v| v.as_str()).unwrap_or("");
     let body = message.body();
     let event = match member {
+        "ClipboardChanged" => {
+            let (mimes, sensitive) = body.deserialize().map_err(|e| e.to_string())?;
+            Event::ClipboardOffer {
+                offer: ClipboardOffer { mimes, sensitive },
+                key: None,
+            }
+        }
         "FocusChanged" => {
             let (dict,): (HashMap<String, OwnedValue>,) =
                 body.deserialize().map_err(|e| e.to_string())?;
@@ -606,6 +936,59 @@ mod tests {
                 OwnedValue::try_from(Structure::from((-10i32, 20i32, 800i32, 600i32))).unwrap(),
             ),
         ])
+    }
+    #[test]
+    fn window_action_variants_and_confirmed_dict_keep_exact_types() {
+        let (name, arg) = action_wire(WindowAction::SetAbove(true)).unwrap();
+        assert_eq!(name, "set_above");
+        assert_eq!(bool::try_from(arg).unwrap(), true);
+        let (name, arg) = action_wire(WindowAction::SetOpacity(128)).unwrap();
+        assert_eq!(name, "set_opacity");
+        assert_eq!(u8::try_from(arg).unwrap(), 128);
+        assert!(action_wire(WindowAction::SetOpacity(25)).is_err());
+        let fields = || {
+            HashMap::from([
+                ("maximized".into(), false.into()),
+                ("above".into(), true.into()),
+                ("opacity".into(), 128u8.into()),
+                ("minimized".into(), false.into()),
+            ])
+        };
+        assert_eq!(decode_window_state(fields()).unwrap().opacity, 128);
+        let mut wrong = fields();
+        wrong.insert("opacity".into(), 128u32.into());
+        assert!(decode_window_state(wrong).is_err());
+        let mut missing = fields();
+        missing.remove("above");
+        assert!(decode_window_state(missing).is_err());
+    }
+    #[test]
+    fn clipboard_bytes_are_borrowed_and_secret_offer_is_retained() {
+        let call = zbus::Message::method_call(OBJECT_PATH, "GetClipboard")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let message = zbus::Message::method_return(&call.header())
+            .unwrap()
+            .build(&(b"safe fixture".as_slice(),))
+            .unwrap();
+        let body = message.body();
+        let (bytes,): (&[u8],) = body.deserialize().unwrap();
+        assert_eq!(state::text(bytes).unwrap(), "safe fixture");
+        let message = zbus::Message::signal(OBJECT_PATH, INTERFACE, "ClipboardChanged")
+            .unwrap()
+            .build(&(vec!["text/plain"], true))
+            .unwrap();
+        assert!(matches!(
+            decode_signal(&message).unwrap(),
+            Some(Event::ClipboardOffer {
+                offer: ClipboardOffer {
+                    sensitive: true,
+                    ..
+                },
+                key: None
+            })
+        ));
     }
     #[test]
     fn disabled_launcher_releases_search_binding_and_preserves_theme() {

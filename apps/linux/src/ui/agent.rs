@@ -71,7 +71,12 @@ impl AgentView {
         }
         if let Some((deadline, label)) = self.expiry.borrow().as_ref() {
             let left = deadline.saturating_duration_since(Instant::now()).as_secs() + 1;
-            label.set_text(&format!("Осталось {}:{:02}", left / 60, left % 60));
+            let prefix = if matches!(id, Some(CardId::Ask(_))) {
+                "Не дольше"
+            } else {
+                "Осталось"
+            };
+            label.set_text(&format!("{prefix} {}:{:02}", left / 60, left % 60));
         }
         id.is_some()
     }

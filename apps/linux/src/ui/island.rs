@@ -39,6 +39,7 @@ pub struct Island {
     search_button: gtk::Button,
     launcher_previous: Cell<Option<(bool, bool)>>,
     last_launcher_enabled: Cell<Option<bool>>,
+    last_clipboard_enabled: Cell<Option<bool>>,
     settings_button: gtk::Button,
     revealer: gtk::Revealer,
     root: gtk::Box,
@@ -177,6 +178,7 @@ impl Island {
         let status = gtk::Label::new(Some(&shell_status()));
         status.set_xalign(0.0);
         status.set_wrap(true);
+        status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         status.add_css_class("tidemark-status");
         expanded.append(&status);
         let restart = gtk::Button::with_label("Перезапустить для GNOME…");
@@ -185,9 +187,10 @@ impl Island {
         revealer.set_child(Some(&expanded));
         root.append(&revealer);
 
-        let handle = gtk::WindowHandle::new();
-        handle.set_child(Some(&root));
-        window.set_content(Some(&handle));
+        // GtkWindowHandle's bin layout does not propagate height-for-width
+        // requests. Wrapped agent cards can then allocate at their narrow
+        // natural height even though the actual window is wide enough.
+        window.set_content(Some(&root));
         // Adwaita/Wayland can initially allocate its natural 360×200 size
         // despite builder defaults. Apply the same explicit compact request
         // used by collapse(), before the first presentation.
@@ -219,6 +222,7 @@ impl Island {
             search_button,
             launcher_previous: Cell::new(None),
             last_launcher_enabled: Cell::new(None),
+            last_clipboard_enabled: Cell::new(None),
             settings_button,
             revealer,
             root,
@@ -580,6 +584,9 @@ impl Island {
         Ok(())
     }
 
+    pub fn clipboard_history_enabled(&self) -> bool {
+        self.shared.config.borrow().clipboard_history
+    }
     pub fn launcher_enabled(&self) -> bool {
         self.shared.config.borrow().launcher
     }
@@ -664,7 +671,24 @@ impl Island {
     }
 
     pub fn attach_shell(&self, service: shell::Service) {
+        self.shared.shell.replace(service.clone());
         self.shell.replace(service);
+    }
+    fn sync_clipboard_setting(&self) {
+        let enabled = self.clipboard_history_enabled()
+            && self
+                .shell_caps
+                .borrow()
+                .contains(&Capability::ClipboardRead);
+        if self.last_clipboard_enabled.get() != Some(enabled)
+            && self
+                .shell
+                .borrow()
+                .send(ShellCommand::CaptureClipboard(enabled))
+        {
+            self.last_clipboard_enabled.set(Some(enabled));
+            self.clipboard.refresh();
+        }
     }
 
     fn place_shell(&self) {
@@ -711,16 +735,52 @@ impl Island {
         }
     }
 
+    fn mark_unsupported(&self, cap: Capability) {
+        self.shell_caps
+            .borrow_mut()
+            .retain(|current| *current != cap);
+        self.shared
+            .shell_caps
+            .borrow_mut()
+            .retain(|current| *current != cap);
+        if cap == Capability::ClipboardRead {
+            self.last_clipboard_enabled.set(None);
+            self.sync_clipboard_setting();
+        }
+        if cap == Capability::WindowActions {
+            self.control.set_window_context(
+                self.shared.shell_peer.borrow().clone(),
+                self.focus.borrow().clone(),
+                false,
+            );
+        }
+    }
+
     pub fn handle_shell(&self, event: ShellEvent) {
         match event {
-            ShellEvent::Connected(caps) => {
+            ShellEvent::Connected(caps, peer) => {
+                self.shared.shell_peer.replace(Some(peer));
+                self.shared.shell_caps.replace(caps.clone());
                 self.shell_caps.replace(caps);
+                self.clipboard.context_changed();
+                self.control.set_window_context(
+                    self.shared.shell_peer.borrow().clone(),
+                    self.focus.borrow().clone(),
+                    self.shell_caps
+                        .borrow()
+                        .contains(&Capability::WindowActions),
+                );
+                self.last_clipboard_enabled.set(None);
+                self.sync_clipboard_setting();
                 self.last_placement.set(None);
                 self.last_launcher_enabled.set(None);
                 self.sync_launcher_setting();
                 self.restart.set_visible(false);
                 let implemented = [
                     Capability::PlaceWindows,
+                    Capability::WindowActions,
+                    Capability::ClipboardRead,
+                    Capability::ClipboardWrite,
                     Capability::FocusTracking,
                     Capability::FullscreenTracking,
                     Capability::MaximizedTracking,
@@ -739,6 +799,10 @@ impl Island {
             }
             ShellEvent::Disconnected(message) => {
                 self.shell_caps.borrow_mut().clear();
+                self.shared.shell_caps.borrow_mut().clear();
+                self.shared.shell_peer.borrow_mut().take();
+                self.clipboard.context_changed();
+                self.control.set_window_context(None, None, false);
                 self.primary_monitor.set(None);
                 self.fullscreen.borrow_mut().clear();
                 self.apply_fullscreen();
@@ -752,7 +816,44 @@ impl Island {
                 self.status.set_text("GNOME требует доверенный запуск. Перезапуск возможен только с вашим подтверждением.");
             }
             ShellEvent::HandoverAccepted => self.app.quit(),
+            ShellEvent::WindowResult {
+                request,
+                peer,
+                id,
+                result,
+            } => {
+                if let Err(tidemark_core::shell::ShellError::Unsupported(cap)) = &result {
+                    self.mark_unsupported(*cap);
+                }
+                self.control.handle_window_result(request, peer, id, result);
+            }
+            ShellEvent::ClipboardOffer { offer, key } => self.clipboard.offer_changed(
+                key,
+                offer.sensitive
+                    || offer
+                        .mimes
+                        .iter()
+                        .any(|mime| mime == "x-kde-passwordManagerHint"),
+            ),
+            ShellEvent::ClipboardText(key, text) => self.clipboard.receive_text(key, text),
+            ShellEvent::ClipboardWritten {
+                request,
+                peer,
+                result,
+            } => {
+                if let Err(tidemark_core::shell::ShellError::Unsupported(cap)) = &result {
+                    self.mark_unsupported(*cap);
+                }
+                self.clipboard.written(request, peer, result);
+            }
             ShellEvent::Focus(focus) => {
+                self.control.set_window_context(
+                    self.shared.shell_peer.borrow().clone(),
+                    focus.clone(),
+                    self.shell_caps
+                        .borrow()
+                        .contains(&Capability::WindowActions),
+                );
                 self.focus.replace(focus);
                 self.refresh_shell_state();
             }
@@ -812,7 +913,12 @@ impl Island {
                         .set_text(&format!("Сочетания заняты: {}", failed.join(", ")));
                 }
             }
-            ShellEvent::Error(error) => self.status.set_text(&format!("GNOME: {error}")),
+            ShellEvent::Error(error) => {
+                if let tidemark_core::shell::ShellError::Unsupported(cap) = &error {
+                    self.mark_unsupported(*cap);
+                }
+                self.status.set_text(&format!("GNOME: {error}"));
+            }
         }
         self.shared
             .shell_status
@@ -931,6 +1037,7 @@ impl Island {
 
     pub fn tick(&self) {
         self.sync_launcher_setting();
+        self.sync_clipboard_setting();
         self.update_input_region();
         self.apply_fullscreen();
         self.place_shell();
