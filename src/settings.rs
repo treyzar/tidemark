@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[path = "settings_motion.rs"]
 mod motion;
 #[path = "settings_skin.rs"]
-mod skin;
+pub(crate) mod skin;
 use motion::Tween;
 const TIMER_MOTION: usize = 0x5449;
 #[derive(Clone, Copy)]

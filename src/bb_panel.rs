@@ -1,7 +1,14 @@
 //! Native bb panel, on its own UI thread. No network calls in window procedures.
 use super::*;
+use crate::{
+    bb_layout::{layout, Rect},
+    settings::skin,
+};
+#[path = "bb_skin.rs"]
+mod visual;
 use std::{cell::RefCell, sync::atomic::AtomicBool};
 use windows::Win32::{
+    Graphics::Gdi::*,
     System::LibraryLoader::GetModuleHandleW,
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*},
 };
@@ -19,7 +26,67 @@ const SEND: i32 = 110;
 const REFRESH: i32 = 111;
 const STATUS: i32 = 112;
 const DENY: i32 = 113;
+const CONNECTION: i32 = 114;
 thread_local! {static PANEL:RefCell<Option<Panel>>=const{RefCell::new(None)};}
+#[derive(Clone, PartialEq)]
+struct Render {
+    dpi: u32,
+    fonts: [HFONT; 4],
+    brush: HBRUSH,
+    width: i32,
+    height: i32,
+    connection: bool,
+    meta: String,
+    choices: Vec<Value>,
+    multi: bool,
+    hovered: i32,
+}
+thread_local! {static RENDER:RefCell<Option<Render>>=const{RefCell::new(None)};}
+fn publish_render() {
+    let snapshot = PANEL.with(|p| {
+        let p = p.try_borrow().ok()?;
+        let p = p.as_ref()?;
+        let (width, height) = p.dimensions();
+        let item = p.item();
+        let q = item
+            .as_ref()
+            .map(|i| &i["payload"]["questions"][p.question]);
+        Some((
+            p.hwnd,
+            Render {
+                dpi: p.dpi,
+                fonts: p.fonts,
+                brush: p.brush,
+                width,
+                height,
+                connection: p.connection_page,
+                meta: p.meta.clone(),
+                choices: q
+                    .and_then(|q| q["options"].as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                multi: q.is_some_and(|q| q["multiSelect"] == true),
+                hovered: p.hovered,
+            },
+        ))
+    });
+    if let Some((hwnd, next)) = snapshot {
+        let changed = RENDER.with(|r| {
+            let mut r = r.borrow_mut();
+            if r.as_ref() == Some(&next) {
+                false
+            } else {
+                *r = Some(next);
+                true
+            }
+        });
+        if changed {
+            unsafe {
+                let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            }
+        }
+    }
+}
 struct Panel {
     hwnd: HWND,
     data: Value,
@@ -30,6 +97,22 @@ struct Panel {
     loaded: bool,
     selected_thread: usize,
     selected_item: usize,
+    connection_page: bool,
+    dpi: u32,
+    fonts: [HFONT; 4],
+    brush: HBRUSH,
+    meta: String,
+    hovered: i32,
+}
+impl Drop for Panel {
+    fn drop(&mut self) {
+        unsafe {
+            for f in self.fonts {
+                let _ = DeleteObject(f.into());
+            }
+            let _ = DeleteObject(self.brush.into());
+        }
+    }
 }
 fn child(hwnd: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(hwnd), id).unwrap_or_default() }
@@ -44,6 +127,9 @@ fn text(hwnd: HWND, id: i32) -> String {
     }
 }
 fn set(hwnd: HWND, id: i32, s: &str) {
+    if text(hwnd, id) == s {
+        return;
+    }
     unsafe {
         let _ = SetWindowTextW(child(hwnd, id), &HSTRING::from(s));
     }
@@ -69,6 +155,200 @@ fn combo_add(hwnd: HWND, id: i32, s: &str) {
 impl Panel {
     fn status(&self, s: &str) {
         set(self.hwnd, STATUS, s);
+    }
+    fn choice_count(&self) -> usize {
+        self.item()
+            .and_then(|i| {
+                i["payload"]["questions"][self.question]["options"]
+                    .as_array()
+                    .map(Vec::len)
+            })
+            .unwrap_or(0)
+    }
+    fn dimensions(&self) -> (i32, i32) {
+        unsafe {
+            let mut rc = RECT::default();
+            let _ = GetClientRect(self.hwnd, &mut rc);
+            (
+                rc.right * 96 / self.dpi as i32,
+                rc.bottom * 96 / self.dpi as i32,
+            )
+        }
+    }
+    fn layout(&self) {
+        unsafe {
+            let (width, height) = self.dimensions();
+            let move_to = |id, r: Rect| {
+                let _ = MoveWindow(
+                    child(self.hwnd, id),
+                    skin::scale(r.x, self.dpi),
+                    skin::scale(r.y, self.dpi),
+                    skin::scale(r.w, self.dpi),
+                    skin::scale(r.h, self.dpi),
+                    false,
+                );
+            };
+            let show = |id, on| {
+                let _ = ShowWindow(child(self.hwnd, id), if on { SW_SHOW } else { SW_HIDE });
+            };
+            move_to(
+                CONNECTION,
+                Rect {
+                    x: width - 188,
+                    y: 26,
+                    w: 160,
+                    h: 36,
+                },
+            );
+            set(
+                self.hwnd,
+                CONNECTION,
+                if self.connection_page {
+                    "К вопросам"
+                } else {
+                    "Подключение"
+                },
+            );
+            move_to(
+                REFRESH,
+                Rect {
+                    x: width - 298,
+                    y: 26,
+                    w: 98,
+                    h: 36,
+                },
+            );
+            for id in [THREAD, ITEM, DETAIL, TEXT, SEND, OPTIONS, DENY, REFRESH] {
+                show(id, !self.connection_page);
+            }
+            for id in [URL, TOKEN, SAVE, OFF] {
+                show(id, self.connection_page);
+            }
+            if self.connection_page {
+                move_to(
+                    URL,
+                    Rect {
+                        x: 44,
+                        y: 205,
+                        w: width - 88,
+                        h: 28,
+                    },
+                );
+                move_to(
+                    TOKEN,
+                    Rect {
+                        x: 44,
+                        y: 327,
+                        w: width - 88,
+                        h: 28,
+                    },
+                );
+                move_to(
+                    SAVE,
+                    Rect {
+                        x: width - 248,
+                        y: height - 64,
+                        w: 220,
+                        h: 42,
+                    },
+                );
+                move_to(
+                    OFF,
+                    Rect {
+                        x: width - 398,
+                        y: height - 64,
+                        w: 136,
+                        h: 42,
+                    },
+                );
+            } else {
+                let half = (width - 80) / 2;
+                move_to(
+                    THREAD,
+                    Rect {
+                        x: 28,
+                        y: 128,
+                        w: half,
+                        h: 300,
+                    },
+                );
+                move_to(
+                    ITEM,
+                    Rect {
+                        x: width / 2 + 12,
+                        y: 128,
+                        w: half,
+                        h: 300,
+                    },
+                );
+                send(
+                    child(self.hwnd, THREAD),
+                    CB_SETITEMHEIGHT,
+                    WPARAM(usize::MAX),
+                    LPARAM(skin::scale(26, self.dpi) as isize),
+                );
+                send(
+                    child(self.hwnd, ITEM),
+                    CB_SETITEMHEIGHT,
+                    WPARAM(usize::MAX),
+                    LPARAM(skin::scale(26, self.dpi) as isize),
+                );
+                let l = layout(width, height, self.choice_count());
+                move_to(
+                    DETAIL,
+                    Rect {
+                        x: l.question.x + 20,
+                        y: l.question.y + 42,
+                        w: l.question.w - 40,
+                        h: l.question.h - 56,
+                    },
+                );
+                move_to(OPTIONS, l.options);
+                show(OPTIONS, self.choice_count() > 0);
+                move_to(
+                    TEXT,
+                    Rect {
+                        x: l.reply.x + 16,
+                        y: l.reply.y + 14,
+                        w: l.reply.w - 32,
+                        h: l.reply.h - 28,
+                    },
+                );
+                move_to(
+                    SEND,
+                    Rect {
+                        x: width - 248,
+                        y: l.footer + 16,
+                        w: 220,
+                        h: 42,
+                    },
+                );
+                move_to(
+                    DENY,
+                    Rect {
+                        x: width - 398,
+                        y: l.footer + 16,
+                        w: 136,
+                        h: 42,
+                    },
+                );
+                let approval = self.item().is_some_and(|i| {
+                    i["payload"]["kind"] == "approval"
+                        && i["payload"]["subject"]["kind"] != "permission_grant"
+                });
+                show(DENY, approval);
+            }
+            move_to(
+                STATUS,
+                Rect {
+                    x: 28,
+                    y: height - 63,
+                    w: (width - 450).max(220),
+                    h: 46,
+                },
+            );
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
     }
     fn thread(&self) -> Option<&Value> {
         self.data["threads"]
@@ -109,11 +389,7 @@ impl Panel {
                 combo_add(
                     self.hwnd,
                     THREAD,
-                    &format!(
-                        "{}  ·  {}",
-                        t["title"].as_str().unwrap_or(""),
-                        t["status"].as_str().unwrap_or("")
-                    ),
+                    t["title"].as_str().unwrap_or("Без названия"),
                 );
             }
         }
@@ -207,6 +483,8 @@ impl Panel {
             }
     }
     fn render_question(&mut self) {
+        self.layout();
+        self.meta = "Дополнение к задаче".into();
         unsafe {
             send(
                 child(self.hwnd, OPTIONS),
@@ -225,21 +503,18 @@ impl Panel {
             let p = &item["payload"];
             if p["kind"] == "user_question" {
                 let q = &p["questions"][self.question];
-                let mut detail = format!(
-                    "Вопрос {} из {}\r\n\r\n{}\r\n\r\n{}",
+                self.meta = format!(
+                    "Вопрос {} из {}",
                     self.question + 1,
-                    p["questions"].as_array().map_or(0, Vec::len),
-                    q["prompt"].as_str().unwrap_or(""),
-                    if q["multiSelect"] == true {
-                        "Можно выбрать несколько вариантов (Ctrl + клик)."
-                    } else {
-                        "Выберите один вариант или введите свой ответ, если это разрешено."
-                    }
+                    p["questions"].as_array().map_or(0, Vec::len)
                 );
+                let detail = q["prompt"].as_str().unwrap_or("").to_string();
                 if let Some(options) = q["options"].as_array() {
                     for o in options {
                         let label = o["label"].as_str().unwrap_or("");
-                        let value: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+                        let accessible =
+                            format!("{} {}", label, o["description"].as_str().unwrap_or(""));
+                        let value: Vec<u16> = accessible.encode_utf16().chain(Some(0)).collect();
                         send(
                             child(self.hwnd, OPTIONS),
                             LB_ADDSTRING,
@@ -263,11 +538,6 @@ impl Panel {
                                 LPARAM(index),
                             );
                         }
-                        detail.push_str(&format!(
-                            "\r\n\r\n{}: {}",
-                            label,
-                            o["description"].as_str().unwrap_or("")
-                        ));
                     }
                 }
                 set(
@@ -287,6 +557,7 @@ impl Panel {
                     },
                 );
             } else if p["kind"] == "approval" && p["subject"]["kind"] != "permission_grant" {
+                self.meta = "Нужно ваше разрешение".into();
                 set(
                     self.hwnd,
                     DETAIL,
@@ -306,6 +577,7 @@ impl Panel {
                 );
                 set(self.hwnd, SEND, "Разрешить один раз");
             } else {
+                self.meta = "Запрос агента".into();
                 set(
                     self.hwnd,
                     DETAIL,
@@ -408,7 +680,7 @@ impl Panel {
     fn enable_controls(&self, enabled: bool) {
         unsafe {
             for id in [
-                URL, TOKEN, SAVE, OFF, THREAD, ITEM, OPTIONS, TEXT, SEND, DENY, REFRESH,
+                URL, TOKEN, SAVE, OFF, THREAD, ITEM, OPTIONS, TEXT, SEND, DENY, REFRESH, CONNECTION,
             ] {
                 let _ = EnableWindow(child(self.hwnd, id), enabled);
             }
@@ -473,17 +745,33 @@ pub fn open() {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        let width = 760;
+        let dpi = ui_dpi();
+        let height = ((GetSystemMetrics(SM_CYSCREEN) - 96) * 96 / dpi as i32 - 40).clamp(620, 740);
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: skin::scale(760, dpi),
+            bottom: skin::scale(height, dpi),
+        };
+        let _ = AdjustWindowRectExForDpi(
+            &mut bounds,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+            false,
+            WS_EX_CONTROLPARENT,
+            GetDpiForSystem(),
+        );
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
         let x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
         if let Ok(hwnd) = CreateWindowExW(
-            WS_EX_TOPMOST,
+            WS_EX_CONTROLPARENT,
             w!("TidemarkBbPanel"),
             w!("Tidemark · bb"),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             x,
-            70,
+            ((GetSystemMetrics(SM_CYSCREEN) - height) / 2).max(0),
             width,
-            770,
+            height,
             None,
             None,
             Some(instance.into()),
@@ -503,211 +791,139 @@ pub fn open() {
         OPEN.store(false, Ordering::SeqCst);
     });
 }
-unsafe fn control(
-    hwnd: HWND,
-    class: PCWSTR,
-    label: &str,
-    id: i32,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    style: WINDOW_STYLE,
-) {
+unsafe fn control(hwnd: HWND, class: PCWSTR, label: &str, id: i32, style: WINDOW_STYLE) {
+    let dpi = PANEL.with(|p| p.borrow().as_ref().map_or(96, |p| p.dpi));
     if let Ok(h) = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         class,
         &HSTRING::from(label),
         WS_CHILD | WS_VISIBLE | style,
-        x,
-        y,
-        width,
-        height,
+        0,
+        0,
+        skin::scale(120, dpi),
+        skin::scale(32, dpi),
         Some(hwnd),
         Some(HMENU(id as *mut _)),
         Some(GetModuleHandleW(None).unwrap_or_default().into()),
         None,
     ) {
-        use windows::Win32::Graphics::Gdi::*;
-        send(
-            h,
-            WM_SETFONT,
-            WPARAM(GetStockObject(DEFAULT_GUI_FONT).0 as usize),
-            LPARAM(1),
-        );
+        let font = PANEL
+            .with(|p| {
+                p.borrow().as_ref().map(|p| {
+                    p.fonts[if id == STATUS {
+                        1
+                    } else if id == DETAIL {
+                        3
+                    } else {
+                        0
+                    }]
+                })
+            })
+            .unwrap_or_default();
+        send(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+        if matches!(
+            id,
+            SEND | SAVE | DENY | OFF | REFRESH | CONNECTION | TEXT | OPTIONS
+        ) {
+            let _ = windows::Win32::UI::Shell::SetWindowSubclass(h, Some(control_proc), 1, 0);
+        }
+    }
+}
+fn ui_dpi() -> u32 {
+    unsafe {
+        GetDpiForSystem()
+            .max(96)
+            .min((((GetSystemMetrics(SM_CYSCREEN) - 96) * 96) / 660).max(96) as u32)
     }
 }
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
-            let edit = WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
-            let button = WS_TABSTOP;
-            let combo = WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32);
-            control(
+            let dpi = ui_dpi();
+            let c = connection();
+            let p = Panel {
                 hwnd,
-                w!("STATIC"),
-                "Адрес сервера bb",
-                0,
-                16,
-                12,
-                200,
-                20,
-                WINDOW_STYLE(0),
-            );
-            control(hwnd, w!("EDIT"), "", URL, 16, 34, 540, 26, edit);
-            control(
-                hwnd,
-                w!("BUTTON"),
-                "Подключить",
-                SAVE,
-                568,
-                34,
-                160,
-                26,
-                button,
-            );
-            control(
-                hwnd,
-                w!("STATIC"),
-                "Токен: bb plugin token tidemark",
-                0,
-                16,
-                66,
-                450,
-                20,
-                WINDOW_STYLE(0),
-            );
+                data: Value::Null,
+                question: 0,
+                answers: serde_json::Map::new(),
+                result: Arc::new(Mutex::new(None)),
+                busy: false,
+                loaded: false,
+                selected_thread: 0,
+                selected_item: 0,
+                connection_page: c.token.is_empty(),
+                dpi,
+                fonts: [
+                    skin::font(15, 400, dpi),
+                    skin::font(12, 400, dpi),
+                    skin::font(25, 600, dpi),
+                    skin::font(18, 400, dpi),
+                ],
+                brush: CreateSolidBrush(skin::color(skin::BG)),
+                meta: String::new(),
+                hovered: 0,
+            };
+            PANEL.with(|cell| *cell.borrow_mut() = Some(p));
+            publish_render();
+            let edit = WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+            let button = WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32);
+            let combo = WS_TABSTOP
+                | WS_VSCROLL
+                | WINDOW_STYLE((CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS) as u32);
+            control(hwnd, w!("EDIT"), "", URL, edit);
             control(
                 hwnd,
                 w!("EDIT"),
                 "",
                 TOKEN,
-                16,
-                88,
-                540,
-                26,
                 edit | WINDOW_STYLE(ES_PASSWORD as u32),
             );
-            control(
-                hwnd,
-                w!("BUTTON"),
-                "Отключить",
-                OFF,
-                568,
-                88,
-                160,
-                26,
-                button,
-            );
-            control(
-                hwnd,
-                w!("STATIC"),
-                "Тред",
-                0,
-                16,
-                125,
-                160,
-                20,
-                WINDOW_STYLE(0),
-            );
-            control(hwnd, w!("COMBOBOX"), "", THREAD, 16, 147, 540, 300, combo);
-            control(
-                hwnd,
-                w!("BUTTON"),
-                "Обновить",
-                REFRESH,
-                568,
-                147,
-                160,
-                26,
-                button,
-            );
-            control(hwnd, w!("COMBOBOX"), "", ITEM, 16, 185, 712, 300, combo);
+            control(hwnd, w!("BUTTON"), "Подключить", SAVE, button);
+            control(hwnd, w!("BUTTON"), "Отключить", OFF, button);
+            control(hwnd, w!("BUTTON"), "Подключение", CONNECTION, button);
+            control(hwnd, w!("BUTTON"), "Обновить", REFRESH, button);
+            control(hwnd, w!("COMBOBOX"), "", THREAD, combo);
+            control(hwnd, w!("COMBOBOX"), "", ITEM, combo);
             control(
                 hwnd,
                 w!("EDIT"),
                 "",
                 DETAIL,
-                16,
-                225,
-                712,
-                185,
-                WS_BORDER
-                    | WS_VSCROLL
-                    | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY) as u32),
+                WS_VSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY) as u32),
             );
             control(
                 hwnd,
                 w!("LISTBOX"),
                 "",
                 OPTIONS,
-                16,
-                420,
-                712,
-                90,
-                WS_BORDER
-                    | WS_TABSTOP
+                WS_TABSTOP
                     | WS_VSCROLL
-                    | WINDOW_STYLE((LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT) as u32),
+                    | WINDOW_STYLE(
+                        (LBS_OWNERDRAWFIXED
+                            | LBS_HASSTRINGS
+                            | LBS_NOTIFY
+                            | LBS_MULTIPLESEL
+                            | LBS_NOINTEGRALHEIGHT) as u32,
+                    ),
             );
-            control(
-                hwnd,
-                w!("STATIC"),
-                "Ваш ответ / дополнение",
-                0,
-                16,
-                519,
-                350,
-                20,
-                WINDOW_STYLE(0),
+            send(
+                child(hwnd, OPTIONS),
+                LB_SETITEMHEIGHT,
+                WPARAM(0),
+                LPARAM(skin::scale(64, dpi) as isize),
             );
             control(
                 hwnd,
                 w!("EDIT"),
                 "",
                 TEXT,
-                16,
-                543,
-                712,
-                95,
-                WS_BORDER
-                    | WS_TABSTOP
+                WS_TABSTOP
                     | WS_VSCROLL
                     | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32),
             );
-            control(
-                hwnd,
-                w!("BUTTON"),
-                "Отправить",
-                SEND,
-                16,
-                650,
-                300,
-                30,
-                button,
-            );
-            control(
-                hwnd,
-                w!("BUTTON"),
-                "Отклонить",
-                DENY,
-                328,
-                650,
-                140,
-                30,
-                button,
-            );
-            control(
-                hwnd,
-                w!("STATIC"),
-                "",
-                STATUS,
-                16,
-                688,
-                712,
-                45,
-                WINDOW_STYLE(0),
-            );
+            control(hwnd, w!("BUTTON"), "Отправить", SEND, button);
+            control(hwnd, w!("BUTTON"), "Отклонить", DENY, button);
+            control(hwnd, w!("STATIC"), "", STATUS, WINDOW_STYLE(0));
             send(child(hwnd, TEXT), EM_SETLIMITTEXT, WPARAM(32000), LPARAM(0));
             send(
                 child(hwnd, DETAIL),
@@ -715,7 +931,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 WPARAM(2 * 1024 * 1024),
                 LPARAM(0),
             );
-            let c = connection();
+            send(
+                child(hwnd, TEXT),
+                EM_SETCUEBANNER,
+                WPARAM(0),
+                LPARAM(w!("Напишите ответ или дополнение к задаче…").as_ptr() as isize),
+            );
             set(
                 hwnd,
                 URL,
@@ -726,26 +947,23 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 },
             );
             set(hwnd, TOKEN, &c.token);
-            let mut p = Panel {
-                hwnd,
-                data: Value::Null,
-                question: 0,
-                answers: serde_json::Map::new(),
-                result: Arc::new(Mutex::new(None)),
-                busy: false,
-                loaded: false,
-                selected_thread: 0,
-                selected_item: 0,
-            };
-            p.refresh();
-            PANEL.with(|cell| *cell.borrow_mut() = Some(p));
+            PANEL.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.refresh();
+                    p.layout();
+                }
+            });
+            publish_render();
             SetTimer(Some(hwnd), 1, 500, None);
             return LRESULT(0);
         }
         WM_COMMAND => {
             let id = (wp.0 & 0xffff) as i32;
             let notification = (wp.0 >> 16) as u32;
-            if !matches!(id, SAVE | OFF | THREAD | ITEM | SEND | DENY | REFRESH) {
+            if !matches!(
+                id,
+                SAVE | OFF | THREAD | ITEM | SEND | DENY | REFRESH | CONNECTION | OPTIONS
+            ) {
                 return LRESULT(0);
             }
             PANEL.with(|cell| {
@@ -757,6 +975,30 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     return;
                 }
                 match id {
+                    CONNECTION => {
+                        p.connection_page = !p.connection_page;
+                        p.layout();
+                    }
+                    OPTIONS if notification == LBN_SELCHANGE => {
+                        if p.item().is_some_and(|i| {
+                            i["payload"]["questions"][p.question]["multiSelect"] != true
+                        }) {
+                            let index =
+                                send(child(hwnd, OPTIONS), LB_GETCARETINDEX, WPARAM(0), LPARAM(0))
+                                    .0;
+                            let selected = send(
+                                child(hwnd, OPTIONS),
+                                LB_GETSEL,
+                                WPARAM(index.max(0) as usize),
+                                LPARAM(0),
+                            )
+                            .0;
+                            send(child(hwnd, OPTIONS), LB_SETSEL, WPARAM(0), LPARAM(-1));
+                            if selected > 0 {
+                                send(child(hwnd, OPTIONS), LB_SETSEL, WPARAM(1), LPARAM(index));
+                            }
+                        }
+                    }
                     SAVE => {
                         if !p.discard_allowed() {
                             return;
@@ -767,6 +1009,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         };
                         match save(&c) {
                             Ok(()) => {
+                                p.connection_page = false;
                                 p.refresh();
                                 p.loaded = false;
                                 p.status("Подключение…");
@@ -780,6 +1023,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         }
                         disconnect();
                         set(hwnd, TOKEN, "");
+                        p.connection_page = true;
                         p.refresh();
                     }
                     THREAD if notification == CBN_SELCHANGE => {
@@ -824,6 +1068,59 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     _ => {}
                 }
             });
+            publish_render();
+            return LRESULT(0);
+        }
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_PAINT => {
+            paint_window(hwnd, None);
+            return LRESULT(0);
+        }
+        WM_PRINTCLIENT => {
+            paint_window(hwnd, Some(HDC(wp.0 as *mut _)));
+            return LRESULT(0);
+        }
+        WM_DRAWITEM => {
+            draw_control(&*(lp.0 as *const DRAWITEMSTRUCT));
+            return LRESULT(1);
+        }
+        WM_MEASUREITEM => {
+            let item = &mut *(lp.0 as *mut MEASUREITEMSTRUCT);
+            item.itemHeight =
+                skin::scale(if item.CtlID == OPTIONS as u32 { 64 } else { 26 }, ui_dpi()) as u32;
+            return LRESULT(1);
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
+            let dc = HDC(wp.0 as *mut _);
+            let id = GetDlgCtrlID(HWND(lp.0 as *mut _));
+            SetTextColor(
+                dc,
+                skin::color(if id == STATUS { skin::MUTED } else { skin::INK }),
+            );
+            let white = matches!(id, URL | TOKEN | TEXT | DETAIL);
+            SetBkColor(
+                dc,
+                skin::color(if white { visual::WHITE } else { skin::BG }),
+            );
+            if white {
+                return LRESULT(GetStockObject(WHITE_BRUSH).0 as isize);
+            }
+            return LRESULT(
+                RENDER
+                    .with(|r| r.borrow().as_ref().map(|r| r.brush))
+                    .unwrap_or_default()
+                    .0 as isize,
+            );
+        }
+        WM_SIZE => {
+            PANEL.with(|p| {
+                if let Ok(p) = p.try_borrow() {
+                    if let Some(p) = p.as_ref() {
+                        p.layout();
+                    }
+                }
+            });
+            publish_render();
             return LRESULT(0);
         }
         WM_TIMER => {
@@ -834,6 +1131,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
             });
+            publish_render();
             return LRESULT(0);
         }
         WM_CLOSE => {
@@ -855,6 +1153,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_DESTROY => {
+            RENDER.with(|r| *r.borrow_mut() = None);
             PostQuitMessage(0);
             return LRESULT(0);
         }
@@ -865,4 +1164,257 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 
 unsafe fn send(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     SendMessageW(hwnd, msg, Some(wp), Some(lp))
+}
+unsafe fn paint_window(hwnd: HWND, target: Option<HDC>) {
+    let mut ps = PAINTSTRUCT::default();
+    let dc = target.unwrap_or_else(|| BeginPaint(hwnd, &mut ps));
+    let mut rc = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rc);
+    let memory = CreateCompatibleDC(Some(dc));
+    let bitmap = CreateCompatibleBitmap(dc, rc.right.max(1), rc.bottom.max(1));
+    let old = SelectObject(memory, bitmap.into());
+    let fallback = CreateSolidBrush(skin::color(skin::BG));
+    FillRect(memory, &rc, fallback);
+    let _ = DeleteObject(fallback.into());
+    let snapshot = RENDER.with(|r| r.borrow().clone());
+    if let Some(r) = snapshot {
+        let canvas = skin::Canvas {
+            dc: memory,
+            dpi: r.dpi,
+            fonts: r.fonts,
+        };
+        visual::paint(
+            &canvas,
+            r.width,
+            r.height,
+            r.connection,
+            &r.meta,
+            r.choices.len(),
+            windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == child(hwnd, TEXT),
+        );
+    }
+    let _ = BitBlt(dc, 0, 0, rc.right, rc.bottom, Some(memory), 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    let _ = DeleteObject(bitmap.into());
+    let _ = DeleteDC(memory);
+    if target.is_none() {
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+unsafe fn draw_control(d: &DRAWITEMSTRUCT) {
+    let saved = SaveDC(d.hDC);
+    let _ = SetViewportOrgEx(d.hDC, d.rcItem.left, d.rcItem.top, None);
+    let snapshot = RENDER.with(|r| r.borrow().clone());
+    if let Some(r) = snapshot {
+        let width = (d.rcItem.right - d.rcItem.left) * 96 / r.dpi as i32;
+        let height = (d.rcItem.bottom - d.rcItem.top) * 96 / r.dpi as i32;
+        let canvas = skin::Canvas {
+            dc: d.hDC,
+            dpi: r.dpi,
+            fonts: r.fonts,
+        };
+        let focus = d.itemState.0 & ODS_FOCUS.0 != 0;
+        if d.CtlID == OPTIONS as u32 {
+            if let Some(o) = r.choices.get(d.itemID as usize) {
+                visual::choice(
+                    &canvas,
+                    width,
+                    height,
+                    o["label"].as_str().unwrap_or(""),
+                    o["description"].as_str().unwrap_or(""),
+                    d.itemState.0 & ODS_SELECTED.0 != 0,
+                    r.multi,
+                    focus,
+                );
+            } else {
+                canvas.fill(0, 0, width, height, skin::BG);
+            }
+        } else if matches!(d.CtlID as i32, THREAD | ITEM) {
+            canvas.fill(
+                0,
+                0,
+                width,
+                height,
+                if d.itemState.0 & ODS_SELECTED.0 != 0 {
+                    skin::SELECT
+                } else {
+                    visual::WHITE
+                },
+            );
+            let length = send(
+                d.hwndItem,
+                CB_GETLBTEXTLEN,
+                WPARAM(d.itemID as usize),
+                LPARAM(0),
+            )
+            .0;
+            if (0..32000).contains(&length) {
+                let mut text = vec![0u16; length as usize + 1];
+                send(
+                    d.hwndItem,
+                    CB_GETLBTEXT,
+                    WPARAM(d.itemID as usize),
+                    LPARAM(text.as_mut_ptr() as isize),
+                );
+                canvas.text(
+                    &String::from_utf16_lossy(&text[..length as usize]),
+                    10,
+                    0,
+                    width - 20,
+                    height,
+                    0,
+                    skin::INK,
+                );
+            }
+        } else {
+            visual::button(
+                &canvas,
+                width,
+                height,
+                &skin::caption(d.hwndItem),
+                matches!(d.CtlID as i32, SEND | SAVE),
+                d.itemState.0 & ODS_SELECTED.0 != 0,
+                focus,
+                d.itemState.0 & ODS_DISABLED.0 == 0,
+                r.hovered == d.CtlID as i32,
+            );
+        }
+    }
+    let _ = RestoreDC(d.hDC, saved);
+}
+unsafe extern "system" fn control_proc(
+    h: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    let id = GetDlgCtrlID(h);
+    let parent = GetParent(h).unwrap_or_default();
+    if matches!(
+        msg,
+        WM_MOUSEMOVE | WM_MOUSELEAVE | WM_SETFOCUS | WM_KILLFOCUS
+    ) {
+        PANEL.with(|cell| {
+            if let Ok(mut p) = cell.try_borrow_mut() {
+                if let Some(p) = p.as_mut() {
+                    if msg == WM_MOUSEMOVE {
+                        p.hovered = id;
+                        let mut track =
+                            windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+                                cbSize: std::mem::size_of::<
+                                    windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT,
+                                >() as u32,
+                                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                                hwndTrack: h,
+                                ..Default::default()
+                            };
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(
+                            &mut track,
+                        );
+                    }
+                    if msg == WM_MOUSELEAVE && p.hovered == id {
+                        p.hovered = 0;
+                    }
+                }
+            }
+        });
+        publish_render();
+        let _ = InvalidateRect(Some(h), None, false);
+        let _ = InvalidateRect(Some(parent), None, false);
+    }
+    if msg == WM_SETCURSOR && id != TEXT {
+        let _ = SetCursor(LoadCursorW(None, IDC_HAND).ok());
+        return LRESULT(1);
+    }
+    windows::Win32::UI::Shell::DefSubclassProc(h, msg, wp, lp)
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    #[test]
+    fn owner_draw_works_during_a_mutable_controller_borrow() {
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 320,
+                    biHeight: -64,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bmp =
+                CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
+            let old = SelectObject(dc, bmp.into());
+            let fonts = [
+                skin::font(15, 400, 96),
+                skin::font(12, 400, 96),
+                skin::font(25, 600, 96),
+                skin::font(18, 400, 96),
+            ];
+            let brush = CreateSolidBrush(skin::color(skin::BG));
+            PANEL.with(|p| {
+                *p.borrow_mut() = Some(Panel {
+                    hwnd: HWND::default(),
+                    data: Value::Null,
+                    question: 0,
+                    answers: serde_json::Map::new(),
+                    result: Arc::new(Mutex::new(None)),
+                    busy: false,
+                    loaded: false,
+                    selected_thread: 0,
+                    selected_item: 0,
+                    connection_page: false,
+                    dpi: 96,
+                    fonts,
+                    brush,
+                    meta: String::new(),
+                    hovered: 0,
+                })
+            });
+            RENDER.with(|r| {
+                *r.borrow_mut() = Some(Render {
+                    dpi: 96,
+                    fonts,
+                    brush,
+                    width: 320,
+                    height: 64,
+                    connection: false,
+                    meta: String::new(),
+                    choices: vec![serde_json::json!({"label":"Option","description":"Details"})],
+                    multi: false,
+                    hovered: 0,
+                })
+            });
+            PANEL.with(|p| {
+                let _guard = p.borrow_mut();
+                draw_control(&DRAWITEMSTRUCT {
+                    CtlID: OPTIONS as u32,
+                    itemID: 0,
+                    hDC: dc,
+                    rcItem: RECT {
+                        left: 0,
+                        top: 0,
+                        right: 320,
+                        bottom: 64,
+                    },
+                    ..Default::default()
+                });
+            });
+            assert_eq!(GetPixel(dc, 280, 20), skin::color(visual::WHITE));
+            RENDER.with(|r| *r.borrow_mut() = None);
+            PANEL.with(|p| *p.borrow_mut() = None);
+            SelectObject(dc, old);
+            let _ = DeleteObject(bmp.into());
+            let _ = DeleteDC(dc);
+        }
+    }
 }
