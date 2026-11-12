@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
+use adw::prelude::*;
 use gtk::glib;
 use gtk::prelude::*;
 use tidemark_core::notes::Reminder;
@@ -28,6 +29,7 @@ pub struct Island {
     pub text: TextView,
     pub stack: gtk::Stack,
     pub switcher: gtk::StackSwitcher,
+    settings_button: gtk::Button,
     revealer: gtk::Revealer,
     root: gtk::Box,
     collapsed: gtk::Box,
@@ -38,6 +40,8 @@ pub struct Island {
     app: adw::Application,
     shared: Shared,
     me: RefCell<Option<Weak<Self>>>,
+    input_shape: RefCell<Option<(i32, i32, i32, i32, i32)>>,
+    input_region: RefCell<Option<gtk::cairo::Region>>,
 }
 
 impl Island {
@@ -72,9 +76,11 @@ impl Island {
         root.append(&collapsed);
 
         let revealer = gtk::Revealer::new();
-        revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
-        revealer.set_transition_duration(180);
+        // Resize the native surface immediately so a collapsed island never
+        // leaves an expanded transparent surface intercepting other apps.
+        revealer.set_transition_type(gtk::RevealerTransitionType::None);
         revealer.set_reveal_child(false);
+        revealer.set_visible(false);
         revealer.set_halign(gtk::Align::Fill);
 
         let expanded = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -109,7 +115,7 @@ impl Island {
                 _ => control.root.clone().upcast(),
             };
             let scrolled = crate::ui::scroll(&page);
-            stack.add_titled(&scrolled, Some(id), Some(label));
+            stack.add_titled(&scrolled, Some(id), label);
         }
         stack.set_visible_child_name("home");
         switcher.set_stack(Some(&stack));
@@ -126,7 +132,7 @@ impl Island {
 
         let handle = gtk::WindowHandle::new();
         handle.set_child(Some(&root));
-        window.set_child(Some(&handle));
+        window.set_content(Some(&handle));
 
         let island = Rc::new(Self {
             window,
@@ -148,6 +154,8 @@ impl Island {
             app: app.clone(),
             shared,
             me: RefCell::new(None),
+            input_shape: RefCell::new(None),
+            input_region: RefCell::new(None),
         });
         island.me.replace(Some(Rc::downgrade(&island)));
         island.wire();
@@ -155,6 +163,20 @@ impl Island {
     }
 
     fn wire(&self) {
+        let weak = self.weak();
+        self.window.connect_realize(move |window| {
+            if let Some(surface) = window.surface() {
+                let weak = weak.clone();
+                surface.connect_layout(move |_, _, _| {
+                    if let Some(island) = weak.upgrade() {
+                        island.queue_input_region();
+                    }
+                });
+            }
+            if let Some(island) = weak.upgrade() {
+                island.queue_input_region();
+            }
+        });
         let motion = gtk::EventControllerMotion::new();
         {
             let weak = self.weak();
@@ -175,7 +197,9 @@ impl Island {
                 }
             });
         }
-        self.root.add_controller(motion);
+        if !self.shared.smoke {
+            self.root.add_controller(motion);
+        }
 
         let click = gtk::GestureClick::new();
         {
@@ -240,6 +264,7 @@ impl Island {
         let weak = self.weak();
         let source = glib::timeout_add_local_once(Duration::from_millis(delay), move || {
             if let Some(island) = weak.upgrade() {
+                island.hover_source.borrow_mut().take();
                 island.expand();
             }
         });
@@ -259,11 +284,14 @@ impl Island {
         }
         let width = self.shared.config.borrow().expanded_width as i32;
         self.collapsed.set_visible(false);
+        self.revealer.set_visible(true);
         self.revealer.set_reveal_child(true);
         self.root.add_css_class("expanded");
         self.root.remove_css_class("collapsed");
         self.window
             .set_size_request(width.max(320), EXPANDED_HEIGHT);
+        self.window
+            .set_default_size(width.max(320), EXPANDED_HEIGHT);
         self.refresh_current();
     }
 
@@ -274,6 +302,7 @@ impl Island {
         }
         self.collapsed.set_visible(true);
         self.revealer.set_reveal_child(false);
+        self.revealer.set_visible(false);
         self.root.remove_css_class("expanded");
         self.root.add_css_class("collapsed");
         let config = self.shared.config.borrow();
@@ -281,6 +310,127 @@ impl Island {
             config.collapsed_width as i32,
             config.collapsed_height as i32,
         );
+        self.window.set_default_size(
+            config.collapsed_width as i32,
+            config.collapsed_height as i32,
+        );
+    }
+
+    fn update_input_region(&self) {
+        let Some(surface) = self.window.surface() else {
+            return;
+        };
+        let Some(bounds) = self.root.compute_bounds(&self.window) else {
+            return;
+        };
+        let width = self.root.width();
+        let height = self.root.height();
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let radius = if self.revealer.reveals_child() {
+            self.shared.config.borrow().expanded_radius.clamp(0.0, 64.0) as i32
+        } else {
+            18
+        };
+        let shape = (
+            bounds.x().round() as i32,
+            bounds.y().round() as i32,
+            width,
+            height,
+            radius.min(width / 2).min(height / 2),
+        );
+        if self.input_shape.borrow().as_ref() == Some(&shape) {
+            return;
+        }
+        let (x, y, w, h, r) = shape;
+        let mut rows = Vec::with_capacity(h as usize);
+        for row in 0..h {
+            let dy = if row < r {
+                r as f64 - (row as f64 + 0.5)
+            } else if row >= h - r {
+                (row as f64 + 0.5) - (h - r) as f64
+            } else {
+                0.0
+            };
+            let inset = if dy > 0.0 {
+                (r as f64 - ((r * r) as f64 - dy * dy).max(0.0).sqrt()).ceil() as i32
+            } else {
+                0
+            };
+            rows.push(gtk::cairo::RectangleInt::new(
+                x + inset,
+                y + row,
+                w - 2 * inset,
+                1,
+            ));
+        }
+        let region = gtk::cairo::Region::create_rectangles(&rows);
+        surface.set_input_region(&region);
+        self.input_shape.replace(Some(shape));
+        self.input_region.replace(Some(region));
+    }
+
+    fn queue_input_region(&self) {
+        let weak = self.weak();
+        // Tick callbacks precede layout: retain this for a second frame to
+        // read the final allocation, then stop requesting idle redraws.
+        let mut first = true;
+        self.root.add_tick_callback(move |_, _| {
+            let Some(island) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            island.update_input_region();
+            if first {
+                first = false;
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    /// Check the real post-layout allocation and the exact region submitted
+    /// to GDK. GTK has no public input-region getter; compositor click routing
+    /// is a separate desktop acceptance check.
+    pub fn check_geometry(&self, expanded: bool) -> Result<(), String> {
+        self.update_input_region();
+        let config = self.shared.config.borrow();
+        let expected = if expanded {
+            ((config.expanded_width as i32).max(320), EXPANDED_HEIGHT)
+        } else {
+            (
+                config.collapsed_width as i32,
+                config.collapsed_height as i32,
+            )
+        };
+        let actual = (self.root.width(), self.root.height());
+        let surface = self.window.surface().ok_or("missing GDK surface")?;
+        if actual != expected || (surface.width(), surface.height()) != actual {
+            return Err(format!(
+                "expected {expected:?}, root {actual:?}, surface {}x{}",
+                surface.width(),
+                surface.height()
+            ));
+        }
+        let shape = self.input_shape.borrow();
+        let &(x, y, w, h, r) = shape.as_ref().ok_or("missing input shape")?;
+        let region = self.input_region.borrow();
+        let region = region.as_ref().ok_or("missing submitted region")?;
+        if !region.contains_point(x + w / 2, y + h / 2)
+            || region.contains_point(x - 1, y)
+            || region.contains_point(x + w, y + h / 2)
+            || (r > 1 && region.contains_point(x, y))
+        {
+            return Err("input region does not match visible island".into());
+        }
+        println!(
+            "SMOKE_GEOMETRY expanded={expanded} allocation={}x{} radius={r} input_rectangles={}",
+            actual.0,
+            actual.1,
+            region.num_rectangles()
+        );
+        Ok(())
     }
 
     pub fn refresh_current(&self) {
@@ -303,6 +453,7 @@ impl Island {
     }
 
     pub fn tick(&self) {
+        self.update_input_region();
         self.clock.set_text(&local_clock());
         self.home.tick();
         self.update_collapsed();

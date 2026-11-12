@@ -6,7 +6,7 @@
 //! when it was armed, exactly as `SleepTimer` specifies.
 
 use std::io::Read;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use tidemark_mpris::{Client, MprisPlayerId, SleepTimer, TrackSnapshot};
@@ -142,6 +142,7 @@ fn worker(commands: Receiver<MusicCommand>, events: Sender<MusicEvent>) {
                     &mut current,
                     &mut last_snapshot,
                     &mut sleep,
+                    &mut artwork,
                     &mut last_error,
                     &events,
                 );
@@ -160,18 +161,12 @@ fn handle_command(
     current: &mut Option<MprisPlayerId>,
     last_snapshot: &mut Option<TrackSnapshot>,
     sleep: &mut Option<SleepTimer>,
+    artwork: &mut ArtworkCache,
     last_error: &mut Option<String>,
     events: &Sender<MusicEvent>,
 ) {
     if matches!(command, MusicCommand::Refresh) {
-        refresh(
-            client,
-            current,
-            last_snapshot,
-            &mut None,
-            last_error,
-            events,
-        );
+        refresh(client, current, last_snapshot, artwork, last_error, events);
         return;
     }
 
@@ -248,7 +243,10 @@ fn handle_command(
     }
 }
 
-fn ensure_client(client: &mut Option<Client>, events: &Sender<MusicEvent>) -> Option<&Client> {
+fn ensure_client<'a>(
+    client: &'a mut Option<Client>,
+    events: &Sender<MusicEvent>,
+) -> Option<&'a Client> {
     if client.is_none() {
         match Client::connect() {
             Ok(connection) => *client = Some(connection),

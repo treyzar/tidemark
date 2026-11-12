@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gtk::prelude::*;
 use tidemark_core::clip_history::History;
 use tidemark_core::config::{self, Config};
-use tidemark_core::notes;
+use tidemark_core::notes as core_notes;
 use tidemark_core::timer::Timer;
 
 use crate::services::music::MusicService;
@@ -26,7 +26,7 @@ use crate::services::music::MusicService;
 pub struct Shared {
     pub config: Rc<RefCell<Config>>,
     pub clip: Rc<RefCell<History>>,
-    pub notes: Rc<RefCell<notes::Store>>,
+    pub notes: Rc<RefCell<core_notes::Store>>,
     pub timers: Rc<RefCell<Timer>>,
     pub music: MusicService,
     pub smoke: bool,
@@ -37,7 +37,7 @@ impl Shared {
     pub fn new(
         config: Rc<RefCell<Config>>,
         clip: Rc<RefCell<History>>,
-        notes: Rc<RefCell<notes::Store>>,
+        notes: Rc<RefCell<core_notes::Store>>,
         timers: Rc<RefCell<Timer>>,
         music: MusicService,
         smoke: bool,
@@ -66,13 +66,11 @@ impl Shared {
 
     pub fn reload_css(&self) {
         let css = build_css(&self.config.borrow(), is_dark(&self.config.borrow()));
-        self.css.load_from_data(&css);
+        self.css.load_from_string(&css);
     }
 
     pub fn save_config(&self) {
-        if let Err(error) = self.config.borrow().save() {
-            eprintln!("Tidemark: could not save config: {error}");
-        }
+        self.config.borrow().save();
     }
 
     pub fn is_dark(&self) -> bool {
@@ -126,6 +124,7 @@ fn build_css(config: &Config, dark: bool) -> String {
     };
     let opacity = config.opacity.clamp(0.2, 1.0);
     let bg = with_alpha(&background, opacity);
+    let radius = config.expanded_radius.clamp(0.0, 64.0);
 
     format!(
         r#"
@@ -137,7 +136,7 @@ window.tidemark-window {{ background: transparent; }}
     border-radius: 18px;
     padding: 0;
 }}
-.tidemark-island.expanded {{ border-radius: 22px; }}
+.tidemark-island.expanded {{ border-radius: {radius}px; }}
 .tidemark-collapsed {{ padding: 8px 14px; }}
 .tidemark-clock {{ font-weight: 700; font-size: 14px; }}
 .tidemark-mini {{ color: {subtext}; font-size: 12px; }}

@@ -6,3 +6,4 @@ pub mod autostart;
 pub mod clipboard;
 pub mod file_manager;
 pub mod music;
+pub mod shell;

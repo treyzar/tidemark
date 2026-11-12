@@ -43,12 +43,8 @@ pub fn preflight(args: &[String]) -> LaunchDecision {
     let Ok(connection) = zbus::blocking::Connection::session() else {
         return LaunchDecision::NoAdapter;
     };
-    let Ok(proxy) = zbus::blocking::Proxy::new(
-        &connection,
-        BUS_NAME,
-        OBJECT_PATH,
-        INTERFACE,
-    ) else {
+    let Ok(proxy) = zbus::blocking::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE)
+    else {
         return LaunchDecision::NoAdapter;
     };
     match proxy.call::<_, _, bool>("RequestLaunch", &(allowed,)) {
@@ -84,12 +80,8 @@ pub fn request_handover(args: &[String]) -> bool {
     let Ok(connection) = zbus::blocking::Connection::session() else {
         return false;
     };
-    let Ok(proxy) = zbus::blocking::Proxy::new(
-        &connection,
-        BUS_NAME,
-        OBJECT_PATH,
-        INTERFACE,
-    ) else {
+    let Ok(proxy) = zbus::blocking::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE)
+    else {
         return false;
     };
     proxy

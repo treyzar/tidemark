@@ -63,7 +63,7 @@ impl NotesView {
         reminders_card.append(&status);
         root.append(&reminders_card);
 
-        let debounce = Rc::new(RefCell::new(None));
+        let debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
         {
             let shared = shared.clone();
             let debounce = debounce.clone();
@@ -73,7 +73,9 @@ impl NotesView {
                 }
                 let shared = shared.clone();
                 let buffer = buffer.clone();
+                let completed = debounce.clone();
                 let id = glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    completed.borrow_mut().take();
                     let text = buffer
                         .text(&buffer.start_iter(), &buffer.end_iter(), false)
                         .to_string();
@@ -89,8 +91,14 @@ impl NotesView {
             let entry = entry.clone();
             let reminders = reminders.clone();
             let status = status.clone();
+            let clicked = (
+                shared.clone(),
+                entry.clone(),
+                reminders.clone(),
+                status.clone(),
+            );
             add.connect_clicked(move |_| {
-                add_reminder(&shared, &entry, &reminders, &status);
+                add_reminder(&clicked.0, &clicked.1, &clicked.2, &clicked.3);
             });
             entry.connect_activate(move |entry| {
                 add_reminder(&shared, entry, &reminders, &status);
