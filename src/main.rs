@@ -6,6 +6,8 @@ mod anim;
 mod audio;
 mod autostart;
 mod beat;
+mod bb;
+mod bb_endpoint;
 mod brand;
 mod capture;
 mod clip_history;
@@ -58,6 +60,11 @@ fn main() {
                     let _ = PostMessageW(Some(running), settings::WM_OPEN_SETTINGS, WPARAM(0), LPARAM(0));
                 }
             }
+            if std::env::args().any(|a| a == "--bb") {
+                if let Ok(running) = FindWindowW(w!("WinIslandWindow"), None) {
+                    let _ = PostMessageW(Some(running), bb::WM_OPEN, WPARAM(0), LPARAM(0));
+                }
+            }
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -69,6 +76,8 @@ fn main() {
     autostart::refresh();
     let cfg = config::Config::load();
     let Ok(hwnd) = island::create(cfg) else { return };
+    bb::start(hwnd);
+    if std::env::args().any(|a| a == "--bb") { bb::open(hwnd); }
     if open_settings_requested() {
         settings::open(hwnd);
     }

@@ -13,11 +13,13 @@ const ID_EXIT: usize = 2;
 const ID_OPEN_CONFIG: usize = 3;
 const ID_RELOAD: usize = 4;
 const ID_SETTINGS: usize = 5;
+const ID_BB: usize = 6;
 
 pub enum TrayAction {
     None,
     Reload,
     Settings,
+    Bb,
     Exit,
 }
 
@@ -68,6 +70,7 @@ pub fn on_message(hwnd: HWND, event: u32) -> TrayAction {
         let Ok(menu) = CreatePopupMenu() else { return TrayAction::None };
         let auto_flags = if autostart::is_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Настройки…"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_BB, w!("bb · вопросы и сообщения…"));
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("Открыть config.toml"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Перечитать config.toml"));
         let _ = AppendMenuW(menu, auto_flags, ID_AUTOSTART, w!("Запускать вместе с Windows"));
@@ -91,6 +94,7 @@ pub fn on_message(hwnd: HWND, event: u32) -> TrayAction {
                 TrayAction::None
             }
             ID_SETTINGS => TrayAction::Settings,
+            ID_BB => TrayAction::Bb,
             ID_RELOAD => TrayAction::Reload,
             ID_EXIT => TrayAction::Exit,
             _ => TrayAction::None,

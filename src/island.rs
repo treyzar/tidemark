@@ -262,6 +262,7 @@ pub struct Island {
     /// Agent cards waiting for an answer, oldest first; the first one is
     /// shown while no other alarm is up.
     agent_cards: Vec<AgentCard>,
+    bb_waiting: bool,
     /// Drawn width of the shown agent card's longer line, DIPs.
     agent_text_w: f32,
     recording: Option<record::Recording>,
@@ -301,6 +302,7 @@ enum Focus {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Alarm {
+    Bb,
     Timer,
     Reminder(String),
     /// A coding agent's card (`agent_cards` id).
@@ -466,6 +468,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             ctl_view: None,
             agent_inbox: None,
             agent_cards: Vec::new(),
+            bb_waiting: false,
             agent_text_w: 0.0,
             recording: None,
             top_gap: Spring::new(0.0, STIFFNESS, DAMPING),
@@ -2181,6 +2184,11 @@ impl Island {
     /// Shows an alarm in the pill until dismissed, beeps and bounces.
     fn raise_alarm(&mut self, alarm: Alarm) {
         let toast = match &alarm {
+            Alarm::Bb => Toast {
+                badge: Badge::Text("bb".into()), title: "Агент bb ждёт ответа".into(),
+                text: crate::bb::pending_title().unwrap_or_default(), level: None,
+                actions: vec!["Ответить".into(), "Позже".into()],
+            },
             Alarm::Timer => Toast {
                 badge: Badge::Timer,
                 title: "Время вышло".into(),
@@ -2272,6 +2280,13 @@ impl Island {
     /// Button `i` of the alarm in the pill.
     fn alarm_action(&mut self, i: usize) {
         let Some(alarm) = self.alarm.clone() else { return };
+        if alarm == Alarm::Bb {
+            if self.alarm_since.elapsed() < AGENT_CLICK_GUARD { return; }
+            self.dismiss_alarm();
+            if i == 0 { crate::bb::open(self.hwnd); }
+            self.next_agent_card();
+            return;
+        }
         if alarm == Alarm::Recording {
             self.stop_recording();
             return;
@@ -2309,7 +2324,7 @@ impl Island {
                 self.arm_reminders();
                 self.refresh_notes_view();
             }
-            Alarm::Agent(_) | Alarm::Recording => {}
+            Alarm::Agent(_) | Alarm::Recording | Alarm::Bb => {}
         }
         self.next_agent_card();
     }
@@ -2345,6 +2360,10 @@ impl Island {
             if let Some(id) = self.agent_cards.first().map(|c| c.id) {
                 self.raise_alarm(Alarm::Agent(id));
                 return;
+            }
+            if self.bb_waiting {
+                self.bb_waiting = false;
+                if crate::bb::pending_title().is_some() { self.raise_alarm(Alarm::Bb); return; }
             }
         }
         if self.alarm.is_none() && self.recording.is_some() {
@@ -2545,6 +2564,18 @@ impl Island {
     /// Right-click menu for clipboard rows and dock apps.
     fn context_menu(&mut self, x: i32, y: i32) {
         let hit = self.hit_at(x, y);
+        if hit.is_none() {
+            unsafe {
+                if let Ok(menu) = CreatePopupMenu() {
+                    let _ = AppendMenuW(menu, MF_STRING, 1, w!("bb · вопросы и сообщения…"));
+                    let mut point = POINT::default(); let _ = GetCursorPos(&mut point);
+                    let cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, point.x, point.y, None, self.hwnd, None);
+                    let _ = DestroyMenu(menu);
+                    if cmd.0 == 1 { crate::bb::open(self.hwnd); }
+                }
+            }
+            return;
+        }
         if matches!(hit,Some(Hit::MediaOpen|Hit::MediaMute|Hit::MediaLike|Hit::MediaCopy|Hit::MediaSeek|Hit::MediaPrev|Hit::MediaNext|Hit::MediaPlay|Hit::MediaVolume)) {self.music_menu();return;}
         if matches!(hit,Some(Hit::WinActivate|Hit::WinPin|Hit::WinOpacity|Hit::WinMinimize|Hit::WinMenu)) {self.window_menu();return;}
         let items: Vec<(usize, PCWSTR)> = match hit {
@@ -3406,6 +3437,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| i.agent_arrived());
             return LRESULT(0);
         }
+        crate::bb::WM_OPEN => { crate::bb::open(hwnd); return LRESULT(0); }
+        crate::bb::WM_UPDATE => {
+            with_island(|i| {
+                i.bb_waiting = crate::bb::pending_title().is_some();
+                if crate::bb::pending_title().is_some() {
+                    if i.alarm == Some(Alarm::Bb) { i.raise_alarm(Alarm::Bb); i.bb_waiting = false; }
+                    else { i.next_agent_card(); }
+                } else if i.alarm == Some(Alarm::Bb) { i.dismiss_alarm(); i.next_agent_card(); }
+            });
+            return LRESULT(0);
+        }
         record::WM_RECORDED => {
             with_island(|i| i.recording_done());
             return LRESULT(0);
@@ -3481,6 +3523,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     with_island(|i| i.reload(Config::load()));
                 }
                 TrayAction::Settings => crate::settings::open(hwnd),
+                TrayAction::Bb => crate::bb::open(hwnd),
                 TrayAction::None => {}
             }
             return LRESULT(0);

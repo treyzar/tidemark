@@ -49,6 +49,7 @@ Source: "{#StageDir}\integrations\*"; DestDir: "{app}\integrations"; Flags: igno
 [Icons]
 Name: "{group}\Tidemark"; Filename: "{app}\win-island.exe"
 Name: "{group}\Настройки Tidemark"; Filename: "{app}\win-island.exe"; Parameters: "--settings"
+Name: "{group}\Tidemark — bb"; Filename: "{app}\win-island.exe"; Parameters: "--bb"
 Name: "{autodesktop}\Tidemark"; Filename: "{app}\win-island.exe"; Tasks: desktopicon
 
 [Registry]

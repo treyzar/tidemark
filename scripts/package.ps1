@@ -16,6 +16,8 @@ New-Item -ItemType Directory -Force "$stage\integrations\claude-code", "$stage\i
 
 Copy-Item target\release\win-island.exe, target\release\island-hook.exe $stage
 Copy-Item integrations\opencode\win-island.js "$stage\integrations\opencode"
+New-Item -ItemType Directory -Force "$stage\integrations\bb" | Out-Null
+Copy-Item integrations\bb\* "$stage\integrations\bb"
 Copy-Item README.md $stage
 Copy-Item CHANGELOG.md $stage
 New-Item -ItemType Directory -Force "$stage\docs\design" | Out-Null
