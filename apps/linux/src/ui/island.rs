@@ -323,8 +323,10 @@ impl Island {
         let Some(bounds) = self.root.compute_bounds(&self.window) else {
             return;
         };
-        let width = self.root.width();
-        let height = self.root.height();
+        // Widget::width/height report the content box, excluding the CSS
+        // border. Input must cover the visible border box in surface space.
+        let width = bounds.width().round() as i32;
+        let height = bounds.height().round() as i32;
         if width <= 0 || height <= 0 {
             return;
         }
@@ -403,11 +405,23 @@ impl Island {
                 config.collapsed_height as i32,
             )
         };
-        let actual = (self.root.width(), self.root.height());
+        let bounds = self
+            .root
+            .compute_bounds(&self.window)
+            .ok_or("missing visible bounds")?;
+        let actual = (
+            bounds.width().round() as i32,
+            bounds.height().round() as i32,
+        );
         let surface = self.window.surface().ok_or("missing GDK surface")?;
-        if actual != expected || (surface.width(), surface.height()) != actual {
+        if actual != expected
+            || (surface.width(), surface.height()) != actual
+            || bounds.x().round() as i32 != 0
+            || bounds.y().round() as i32 != 0
+        {
             return Err(format!(
-                "expected {expected:?}, root {actual:?}, surface {}x{}",
+                "expected {expected:?}, visible {actual:?} at ({},{}), content {}x{}, surface {}x{}",
+                bounds.x(), bounds.y(), self.root.width(), self.root.height(),
                 surface.width(),
                 surface.height()
             ));

@@ -59,3 +59,21 @@ Worker orchestration is the parent's task.
   Windows host; **actual integration runs are pending** the parent's Ubuntu CI:
   `dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked`.
 - `Cargo.lock` is generated and kept in the deliverable for `--locked` CI.
+
+## Root Raise follow-up
+
+`Client::raise(&MprisPlayerId)` verifies the captured owner, reads `CanRaise`
+from the canonical `org.mpris.MediaPlayer2` root interface, and awaits `Raise`
+on that same unique-owner destination. False capability returns
+`CapabilityMissing("Raise")`; property/method remote errors propagate as
+`Dbus`. The existing connection-wide five-second timeout bounds each call.
+`Volume` remains on the Player interface. No browser URL fallback or shell-out.
+An acknowledged Raise request does not prove the desktop granted foreground focus.
+
+The official root contract is documented at
+https://specifications.freedesktop.org/mpris/latest/Media_Player.html .
+A FakeRoot is served alongside FakePlayer on the same object path. Three isolated
+Linux tests cover observable fake Raise effects, remote rejection propagation,
+unsupported capability, and stale-owner rejection after restart. Tests were added
+first and Linux-target checking initially failed because `Client::raise` was absent;
+native behavior RED/GREEN remains pending parent Ubuntu `dbus-run-session` CI.

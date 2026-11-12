@@ -247,12 +247,14 @@ fn smoke_dir() -> PathBuf {
 }
 
 fn render_png(widget: &gtk::Widget, path: &Path) -> Result<(), String> {
-    let width = widget.width();
-    let height = widget.height();
+    let paintable = gtk::WidgetPaintable::new(Some(widget));
+    // Paintable dimensions include the widget's CSS border; Widget::width
+    // exposes only its content box and would crop the rendered island.
+    let width = paintable.intrinsic_width();
+    let height = paintable.intrinsic_height();
     if width <= 0 || height <= 0 {
         return Err(format!("widget has no allocation ({width}x{height})"));
     }
-    let paintable = gtk::WidgetPaintable::new(Some(widget));
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, width as f64, height as f64);
     let node = snapshot

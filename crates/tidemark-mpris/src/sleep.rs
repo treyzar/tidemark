@@ -92,10 +92,7 @@ mod tests {
         let mut t = SleepTimer::arm(player(":1.1"), Duration::from_millis(10));
         t.cancel();
         assert!(t.is_cancelled());
-        assert_eq!(
-            t.take_due(Instant::now() + Duration::from_secs(1)),
-            None
-        );
+        assert_eq!(t.take_due(Instant::now() + Duration::from_secs(1)), None);
     }
 
     #[test]

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use zbus::blocking::{Proxy, connection::Builder};
+use zbus::blocking::{connection::Builder, Proxy};
 use zvariant::{ObjectPath, OwnedValue, Value};
 
 use crate::error::{Error, Result};
@@ -24,6 +24,7 @@ use crate::model::{MprisPlayerId, TrackSnapshot};
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
+const ROOT_IFACE: &str = "org.mpris.MediaPlayer2";
 /// Bounded wait for every method call; zbus applies it to reply-awaiting calls.
 const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -101,7 +102,9 @@ impl Client {
                 Value::I64(micros) if *micros >= 0 => Some(Duration::from_micros(*micros as u64)),
                 _ => None,
             }),
-            can_prev: player.get_property::<bool>("CanGoPrevious").unwrap_or(false),
+            can_prev: player
+                .get_property::<bool>("CanGoPrevious")
+                .unwrap_or(false),
             can_next: player.get_property::<bool>("CanGoNext").unwrap_or(false),
             can_seek: player.get_property::<bool>("CanSeek").unwrap_or(false),
             volume,
@@ -194,6 +197,25 @@ impl Client {
         self.player_proxy(id)?
             .set_property("Volume", volume)
             .map_err(|e| Error::Dbus(e.to_string()))
+    }
+
+    /// Requests that the pinned player's UI come forward using the MPRIS root
+    /// interface. A successful reply acknowledges the request; the desktop may
+    /// still prevent focus or foreground activation.
+    pub fn raise(&self, id: &MprisPlayerId) -> Result<()> {
+        self.verify_owner(id)?;
+        let root = Proxy::new(&self.conn, id.owner.as_str(), PLAYER_PATH, ROOT_IFACE)
+            .map_err(|e| Error::Dbus(e.to_string()))?;
+        if !root
+            .get_property::<bool>("CanRaise")
+            .map_err(|e| Error::Dbus(e.to_string()))?
+        {
+            return Err(Error::CapabilityMissing("Raise"));
+        }
+        let _: () = root
+            .call("Raise", &())
+            .map_err(|e| Error::Dbus(e.to_string()))?;
+        Ok(())
     }
 
     // -- internals ----------------------------------------------------------

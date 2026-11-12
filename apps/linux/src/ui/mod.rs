@@ -128,7 +128,18 @@ fn build_css(config: &Config, dark: bool) -> String {
 
     format!(
         r#"
-window.tidemark-window {{ background: transparent; }}
+window.tidemark-window,
+window.tidemark-window.csd,
+window.tidemark-window.solid-csd {{
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+    min-height: 0;
+}}
 .tidemark-island {{
     background: {bg};
     color: {text};

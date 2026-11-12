@@ -29,6 +29,9 @@ struct State {
     position_us: i64,
     track: String,
     volume: f64,
+    can_raise: bool,
+    raised: usize,
+    reject_raise: bool,
 }
 
 impl State {
@@ -38,6 +41,9 @@ impl State {
             position_us: 5_000_000,
             track: TRACK.to_string(),
             volume: 0.5,
+            can_raise: true,
+            raised: 0,
+            reject_raise: false,
         }
     }
 }
@@ -46,16 +52,21 @@ fn metadata(state: &State) -> HashMap<String, Value<'static>> {
     let mut m = HashMap::new();
     m.insert(
         "mpris:trackid".into(),
-        Value::ObjectPath(ObjectPath::try_from(state.track.clone()).unwrap().into()),
+        Value::ObjectPath(ObjectPath::try_from(state.track.clone()).unwrap()),
     );
     m.insert("xesam:title".into(), Value::from("Fake Song"));
     // Canonical MPRIS type for xesam:artist is 'as' (array of strings), not
     // an array of variants — serialize a typed string array.
     let mut artists = zvariant::Array::new(&Signature::Str);
-    artists.append(Value::from("Fake Artist")).expect("'as' item");
+    artists
+        .append(Value::from("Fake Artist"))
+        .expect("'as' item");
     m.insert("xesam:artist".into(), Value::Array(artists));
     m.insert("xesam:album".into(), Value::from("Fake Album"));
-    m.insert("mpris:artUrl".into(), Value::from("https://art.test/cover.png"));
+    m.insert(
+        "mpris:artUrl".into(),
+        Value::from("https://art.test/cover.png"),
+    );
     m.insert("mpris:length".into(), Value::from(200_000_000i64));
     m
 }
@@ -142,7 +153,26 @@ impl FakePlayer {
     }
 }
 
+struct FakeRoot {
+    state: Arc<Mutex<State>>,
+}
 
+#[zbus::interface(name = "org.mpris.MediaPlayer2")]
+impl FakeRoot {
+    #[zbus(property)]
+    fn can_raise(&self) -> bool {
+        self.state.lock().unwrap().can_raise
+    }
+
+    fn raise(&self) -> zbus::fdo::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.reject_raise {
+            return Err(zbus::fdo::Error::Failed("fake raise rejected".into()));
+        }
+        state.raised += 1;
+        Ok(())
+    }
+}
 
 struct FakeInstance {
     name: String,
@@ -165,9 +195,18 @@ impl FakeInstance {
                     let (state, stop, name) = thread_state;
                     let conn = zbus::Connection::session().await.expect("session bus");
                     conn.object_server()
-                        .at("/org/mpris/MediaPlayer2", FakePlayer { state })
+                        .at(
+                            "/org/mpris/MediaPlayer2",
+                            FakePlayer {
+                                state: state.clone(),
+                            },
+                        )
                         .await
                         .expect("serve player");
+                    conn.object_server()
+                        .at("/org/mpris/MediaPlayer2", FakeRoot { state })
+                        .await
+                        .expect("serve root");
                     conn.request_name(name.clone()).await.expect("request name");
                     while !stop.load(Ordering::SeqCst) {
                         async_io::Timer::after(Duration::from_millis(20)).await;
@@ -245,17 +284,29 @@ fn commands_act_and_track_guard_blocks_stale_seek() {
     let id = wait_for_player(&client, &fake.name);
 
     client.play_pause(&id).expect("play_pause");
-    assert!(!fake.state.lock().unwrap().playing, "play_pause must toggle");
+    assert!(
+        !fake.state.lock().unwrap().playing,
+        "play_pause must toggle"
+    );
     client.play_pause(&id).expect("play_pause back");
     assert!(fake.state.lock().unwrap().playing);
 
     // Seeking with a stale track id must be refused, not applied.
-    let wrong = client.seek(&id, "/org/mpris/MediaPlayer2/Track/999", Duration::from_secs(60));
-    assert!(matches!(wrong, Err(Error::TrackMismatch { .. })), "{wrong:?}");
+    let wrong = client.seek(
+        &id,
+        "/org/mpris/MediaPlayer2/Track/999",
+        Duration::from_secs(60),
+    );
+    assert!(
+        matches!(wrong, Err(Error::TrackMismatch { .. })),
+        "{wrong:?}"
+    );
     assert_eq!(fake.state.lock().unwrap().position_us, 5_000_000);
 
     // Seeking the current track works.
-    client.seek(&id, TRACK, Duration::from_secs(90)).expect("seek");
+    client
+        .seek(&id, TRACK, Duration::from_secs(90))
+        .expect("seek");
     assert_eq!(fake.state.lock().unwrap().position_us, 90_000_000);
 
     client.pause_exact(&id).expect("pause_exact");
@@ -300,14 +351,21 @@ fn restarted_player_cannot_be_commanded_with_stale_identity() {
     let second = FakeInstance::serve(SUFFIX_RESTART, Arc::new(Mutex::new(State::new())));
     let fresh = wait_for_player(&client, &name);
     assert_eq!(fresh.bus_name, stale.bus_name);
-    assert_ne!(fresh.owner, stale.owner, "restart must get a new unique owner");
+    assert_ne!(
+        fresh.owner, stale.owner,
+        "restart must get a new unique owner"
+    );
 
-    let err = client.play_pause(&stale).expect_err("stale owner must fail");
+    let err = client
+        .play_pause(&stale)
+        .expect_err("stale owner must fail");
     assert!(
         matches!(err, Error::OwnerChanged { .. }),
         "expected OwnerChanged, got {err}"
     );
-    client.play_pause(&fresh).expect("fresh identity commands the live player");
+    client
+        .play_pause(&fresh)
+        .expect("fresh identity commands the live player");
     assert!(!second.state.lock().unwrap().playing);
     second.stop();
 }
@@ -317,7 +375,56 @@ fn unknown_player_reports_player_gone() {
     let fake = FakeInstance::serve(SUFFIX_GHOST, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
     let _ = wait_for_player(&client, &fake.name);
-    let ghost = MprisPlayerId::new(&format!("{NAME_BASE}absent"), ":1.1234");
+    let ghost = MprisPlayerId::new(format!("{NAME_BASE}absent"), ":1.1234");
     let err = client.play_pause(&ghost).expect_err("ghost must fail");
     assert!(matches!(err, Error::PlayerGone { .. }), "{err}");
+}
+
+#[test]
+fn root_raise_records_effect_and_propagates_remote_rejection() {
+    let fake = FakeInstance::serve("fake.raise_effect", Arc::new(Mutex::new(State::new())));
+    let client = Client::connect().expect("connect");
+    let id = wait_for_player(&client, &fake.name);
+    client.raise(&id).expect("raise acknowledged");
+    assert_eq!(fake.state.lock().unwrap().raised, 1);
+    fake.state.lock().unwrap().reject_raise = true;
+    assert!(matches!(client.raise(&id), Err(Error::Dbus(_))));
+    assert_eq!(fake.state.lock().unwrap().raised, 1);
+    fake.stop();
+}
+
+#[test]
+fn root_raise_requires_can_raise_capability() {
+    let state = Arc::new(Mutex::new(State::new()));
+    state.lock().unwrap().can_raise = false;
+    let fake = FakeInstance::serve("fake.raise_unsupported", state);
+    let client = Client::connect().expect("connect");
+    let id = wait_for_player(&client, &fake.name);
+    assert!(matches!(
+        client.raise(&id),
+        Err(Error::CapabilityMissing("Raise"))
+    ));
+    assert_eq!(fake.state.lock().unwrap().raised, 0);
+    fake.stop();
+}
+
+#[test]
+fn root_raise_rejects_restarted_player_stale_identity() {
+    let first = FakeInstance::serve("fake.raise_restart", Arc::new(Mutex::new(State::new())));
+    let client = Client::connect().expect("connect");
+    let stale = wait_for_player(&client, &first.name);
+    let name = first.name.clone();
+    first.stop();
+    wait_player_gone(&client, &name);
+    let second = FakeInstance::serve("fake.raise_restart", Arc::new(Mutex::new(State::new())));
+    let fresh = wait_for_player(&client, &name);
+    assert_ne!(fresh.owner, stale.owner);
+    assert!(matches!(
+        client.raise(&stale),
+        Err(Error::OwnerChanged { .. })
+    ));
+    assert_eq!(second.state.lock().unwrap().raised, 0);
+    client.raise(&fresh).expect("fresh owner can raise");
+    assert_eq!(second.state.lock().unwrap().raised, 1);
+    second.stop();
 }

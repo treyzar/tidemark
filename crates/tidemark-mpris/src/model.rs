@@ -64,8 +64,7 @@ impl TrackSnapshot {
     /// (`MediaState::position_now` in `src/media.rs`).
     pub fn position_now(&self) -> Duration {
         let pos = if self.playing {
-            self.position
-                + self.sampled_at.elapsed().min(Duration::from_secs(36_000))
+            self.position + self.sampled_at.elapsed().min(Duration::from_secs(36_000))
         } else {
             self.position
         };
@@ -106,11 +105,19 @@ mod tests {
 
     #[test]
     fn paused_position_does_not_advance_and_playing_is_capped() {
-        let mut s = snapshot(false, Duration::from_secs(50), Some(Duration::from_secs(200)));
+        let mut s = snapshot(
+            false,
+            Duration::from_secs(50),
+            Some(Duration::from_secs(200)),
+        );
         s.sampled_at = Instant::now() - Duration::from_secs(5);
         assert_eq!(s.position_now(), Duration::from_secs(50));
 
-        let mut s = snapshot(true, Duration::from_secs(199), Some(Duration::from_secs(200)));
+        let mut s = snapshot(
+            true,
+            Duration::from_secs(199),
+            Some(Duration::from_secs(200)),
+        );
         s.sampled_at = Instant::now() - Duration::from_secs(5);
         assert_eq!(s.position_now(), Duration::from_secs(200));
     }
