@@ -35,6 +35,31 @@ pub enum Error {
     Worker,
 }
 pub type Result<T> = std::result::Result<T, Error>;
+/// A start guard available before the blocking portal call. Cancellation is
+/// irreversible and also aborts a recording if it races with startup completion.
+#[derive(Clone, Default)]
+pub struct StartCancellation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl StartCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub fn is_canceled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn cancel_is_shared_and_irreversible_before_start() {
+        let token = StartCancellation::default();
+        let worker = token.clone();
+        assert!(!worker.is_canceled());
+        token.cancel();
+        token.cancel();
+        assert!(worker.is_canceled());
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sources {
     Monitor,

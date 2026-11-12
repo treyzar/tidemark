@@ -1,6 +1,6 @@
 # Tidemark for Ubuntu — architecture
 
-Status: **proposed architecture, no product code yet.** Reference product: Tidemark for Windows **v1.3.0** (tag `v1.3.0`).
+Status: **architecture and acceptance plan; implementation in progress.** Reference product: Tidemark for Windows **v1.3.0** (tag `v1.3.0`). Current implemented capabilities and preview limitations are listed in the [README](../../README.md#linux); the matrices below remain acceptance targets, not a report that every feature works.
 Nothing in this document claims parity. A feature is at parity only after it passes the release gates in §9 on real Ubuntu systems.
 
 ## 1. Targets
@@ -65,7 +65,7 @@ packaging/debian/             later (parent): cargo-deb metadata, .desktop, auto
 
 Rules:
 - The `windows*` crates are `[target.'cfg(windows)'.dependencies]` of the root package.
-- `cargo build --release` at the root still produces `target/release/win-island.exe` and `island-hook.exe`, so `scripts/package.ps1` and the release workflow are unchanged.
+- `cargo build --release` at the root still produces `target/release/win-island.exe` and `island-hook.exe`. `scripts/package.ps1` retains the Windows installer and ZIP; the release workflow also gates Ubuntu packaging on the Linux test matrix.
 - Each portable module has **one source** in `tidemark-core`. The Windows crate keeps the old paths with `use tidemark_core::{…}` in `src/main.rs` (and `use tidemark_core::media_artwork as artwork` / `settings_motion as motion` where modules were included with `#[path]`).
 
 ### 3.1 What `tidemark-core` contains (milestone 1)

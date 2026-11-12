@@ -255,7 +255,7 @@ fn behaviour_page(shared: &Shared) -> adw::PreferencesPage {
     let network = adw::PreferencesGroup::new();
     network.set_title("Погода и поиск");
     network.set_description(Some(
-        "Погода не реализована в Linux-версии; строка поиска пока только сохраняется.",
+        "Укажите город для плитки погоды и шаблон веб-поиска, который открывается в браузере.",
     ));
     let city = adw::EntryRow::new();
     city.set_title("Город для погоды");
@@ -333,7 +333,7 @@ fn system_page(shared: &Shared) -> adw::PreferencesPage {
     contract.set_subtitle("Версия 1 · org.tidemark.Shell · /org/tidemark/Shell");
     adapter.add(&contract);
     let missing = muted(&format!(
-        "Недоступно без моста: {}.",
+        "Возможности контракта расширения (поддержка зависит от версии): {}.",
         model::missing_capabilities(&[])
             .iter()
             .map(|capability| model::capability_text(*capability).0)
@@ -410,7 +410,7 @@ fn behaviour_switches() -> [SwitchSpec; 9] {
     [
         (
             "История буфера обмена",
-            "Фоновая запись появится с адаптером GNOME Shell; ручное добавление работает.",
+            "С расширением GNOME Shell сохраняются текст и ссылки на локальные файлы; текст можно добавить вручную.",
             |config| config.clipboard_history,
             |config, value| config.clipboard_history = value,
         ),
@@ -434,13 +434,13 @@ fn behaviour_switches() -> [SwitchSpec; 9] {
         ),
         (
             "Уведомления системы",
-            "Громкость, яркость, раскладка и Caps Lock приходят от адаптера.",
+            "Раскладка и Caps Lock отображаются с расширением GNOME; уведомления громкости и яркости пока не реализованы.",
             |config| config.osd,
             |config, value| config.osd = value,
         ),
         (
             "Индикатор приватности",
-            "Камера и микрофон: требуется адаптер.",
+            "Индикатор камеры и микрофона пока не реализован в Linux-версии.",
             |config| config.privacy_indicator,
             |config, value| config.privacy_indicator = value,
         ),

@@ -102,10 +102,7 @@ pub fn capability_text(capability: Capability) -> (&'static str, &'static str) {
             "Остров поверх окон, без рамки и вне списка задач",
         ),
         Capability::InputRegion => ("Клики вне формы", "Прозрачные для мыши поля вокруг острова"),
-        Capability::FocusTracking => (
-            "Активное окно",
-            "Плитка окна и уведомления о переключении приложений",
-        ),
+        Capability::FocusTracking => ("Активное окно", "Плитка активного окна и действия с ним"),
         Capability::WindowActions => (
             "Действия с окном",
             "Поверх всех, прозрачность, свернуть, половина экрана",
@@ -117,13 +114,19 @@ pub fn capability_text(capability: Capability) -> (&'static str, &'static str) {
         Capability::MaximizedTracking => {
             ("Развёрнутые окна", "Сжимать остров над развёрнутым окном")
         }
-        Capability::ClipboardRead => ("Чтение буфера обмена", "История копирования в фоне"),
+        Capability::ClipboardRead => (
+            "Чтение буфера обмена",
+            "Фоновая история текста и ссылок на локальные файлы",
+        ),
         Capability::ClipboardWrite => ("Запись буфера обмена", "Возврат записи из истории в буфер"),
-        Capability::Screenshot => ("Снимок экрана", "Тихий снимок области без острова"),
+        Capability::Screenshot => (
+            "Снимок через расширение",
+            "Снимки приложения доступны отдельно через системный диалог",
+        ),
         Capability::CaptureHiding => ("Скрытие из записи", "Не показывать остров на записи экрана"),
         Capability::GlobalShortcuts => (
             "Горячие клавиши",
-            "Поиск, тема и лайк на глобальных сочетаниях",
+            "Глобальные сочетания для поиска, переключения темы и лайка в Яндекс Музыке",
         ),
         Capability::KeyboardLayout => ("Раскладка клавиатуры", "Индикатор RU/EN"),
         Capability::CapsLock => ("Caps Lock", "Индикатор Caps Lock"),
@@ -144,7 +147,8 @@ pub fn missing_capabilities(caps: &[Capability]) -> Vec<Capability> {
 pub fn shell_status_text(caps: &[Capability]) -> String {
     if caps.is_empty() {
         "Расширение GNOME Shell не подключено. Остров работает как обычное окно; \
-         активное окно, фоновая история буфера, горячие клавиши и захват экрана недоступны."
+         активное окно, фоновая история буфера и глобальные горячие клавиши недоступны. \
+         Захват экрана доступен через системный диалог."
             .into()
     } else {
         format!("Доступно возможностей рабочего стола: {}.", caps.len())

@@ -5,6 +5,7 @@
 ## Integration API
 
 - `Recorder::start(Options, absolute_webm_path) -> Result<Recorder>` is blocking and belongs on a worker. It validates options, acquires the single-recording permit, requests portal consent, creates a private new output, and waits until the encoder has begun writing a WebM cluster. Existing output files are never overwritten.
+- `Recorder::start_with_cancel(options, path, StartCancellation)` preserves that API with a shared cancellation guard available before blocking. UI startup Stop/close cancels this token immediately. Portal configuration polls cancellation every 20 ms and closes its owned request/session, and post-consent guards prevent a late successful response from creating output or launching an encoder. The original `start` uses an uncancelled token for existing callers.
 - `status()` and `poll()` are nonblocking. `poll()` returns `None` until completion; only `Some(Ok(path))` proves a saved file.
 - `request_stop()` requests graceful EOS without blocking the GTK thread. Continue polling for the final result.
 - `stop(self) -> Result<PathBuf>` waits on a worker for graceful stop and cleanup. A timeout/error is not a saved-file result.
@@ -29,7 +30,7 @@ The GStreamer launcher documentation recommends the library API for applications
 
 ## Verification actually performed on Windows
 
-- `cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked`: four portable option/pipeline/shutdown-policy tests pass.
+- `cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked`: five portable option/pipeline/shutdown-policy/cancellation-token tests pass.
 - `cargo fmt --manifest-path crates/tidemark-record/Cargo.toml --check`: passes after recovering two formatting-only differences.
 - `cargo check --manifest-path crates/tidemark-record/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets --locked`: passes.
 - Linux-target and Windows-target clippy with `--all-targets -- -D warnings`: pass.
@@ -43,6 +44,8 @@ dbus-run-session -- cargo test --manifest-path crates/tidemark-record/Cargo.toml
 Fixtures cover response-before-return, canonical lifecycle and Unix FD transfer, cancellation/failure, timeout cleanup, wrong sender/path/owner, revoked sessions, invalid FDs, multiple streams, parent/child FD flags, graceful SIGINT output, forced kill, stderr overflow, encoder rejection and output/replacement preservation. They do not contact a desktop or a real PipeWire server.
 
 Additional native fixtures cover consent-time shutdown returning promptly, EOS requests without downgrading an existing abort, forced interruption of an encoder ignoring EOS, parent-thread death killing an intentionally unreaped child, and an outer caller exiting while the persistent monitor legitimately continues. These compile but still require the Linux run above.
+
+Cancellation regressions use the real private fake portal and production post-consent preparation path: cancelling while Start consent is pending closes its request/session without creating output or requesting PipeWire; a successful response racing with cancellation is rejected before output creation or encoder launch. They compile here and require the same native test run.
 
 After installing the GStreamer packages, also run the explicit synthetic encoder test:
 

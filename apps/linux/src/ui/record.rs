@@ -11,7 +11,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tidemark_record::{Error, Options, Recorder, Sources, Status};
+use tidemark_record::{Error, Options, Recorder, Sources, StartCancellation, Status};
 #[path = "../services/record_state.rs"]
 mod state;
 use state::{Phase, Session, Stop};
@@ -109,6 +109,7 @@ pub fn build(app: &adw::Application, smoke: bool) -> adw::ApplicationWindow {
         chooser: RefCell::new(None),
         session: RefCell::new(Session::default()),
         control: RefCell::new(None),
+        cancellation: RefCell::new(None),
         began: Cell::new(None),
         smoke,
     });
@@ -154,6 +155,7 @@ struct Ui {
     chooser: RefCell<Option<gtk::FileChooserNative>>,
     session: RefCell<Session>,
     control: RefCell<Option<Arc<AtomicU8>>>,
+    cancellation: RefCell<Option<StartCancellation>>,
     began: Cell<Option<Instant>>,
     smoke: bool,
 }
@@ -276,12 +278,14 @@ impl Ui {
             result: None,
         }));
         let flag = control.clone();
+        let cancellation = StartCancellation::default();
+        let cancel_start = cancellation.clone();
         let shared = progress.clone();
         let started = std::thread::Builder::new()
             .name("recording-ui".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker(options, path, &flag, &shared)
+                    worker(options, path, &flag, &shared, cancel_start)
                 }))
                 .unwrap_or(Err(Error::Worker));
                 shared.lock().unwrap_or_else(|e| e.into_inner()).result = Some(result);
@@ -293,6 +297,7 @@ impl Ui {
             return;
         }
         self.control.replace(Some(control));
+        self.cancellation.replace(Some(cancellation));
         self.began.set(None);
         if let Some(elapsed) = self.elapsed.upgrade() {
             elapsed.set_text("00:00");
@@ -314,6 +319,7 @@ impl Ui {
             if let Some(result) = snapshot.result {
                 if ui.session.borrow_mut().finish(request) {
                     ui.control.borrow_mut().take();
+                    ui.cancellation.borrow_mut().take();
                     match result {
                         Ok(path) => ui.message(&format!("Запись сохранена:\n{}", path.display()), false),
                         Err(Error::Canceled) => ui.message("Запуск записи отменён", false),
@@ -362,6 +368,11 @@ impl Ui {
         self.update_actions();
     }
     fn signal(&self, stop: Stop) {
+        if stop == Stop::Cancel {
+            if let Some(cancellation) = self.cancellation.borrow().as_ref() {
+                cancellation.cancel();
+            }
+        }
         if let Some(control) = self.control.borrow().as_ref() {
             control.store(if stop == Stop::Cancel { 2 } else { 1 }, Ordering::Release);
         }
@@ -380,6 +391,11 @@ impl Ui {
 impl Drop for Ui {
     fn drop(&mut self) {
         if let Some(stop) = self.session.get_mut().close() {
+            if stop == Stop::Cancel {
+                if let Some(cancellation) = self.cancellation.get_mut().take() {
+                    cancellation.cancel();
+                }
+            }
             if let Some(control) = self.control.get_mut().take() {
                 control.store(if stop == Stop::Cancel { 2 } else { 1 }, Ordering::Release);
             }
@@ -391,11 +407,12 @@ fn worker(
     path: PathBuf,
     control: &AtomicU8,
     progress: &Mutex<Progress>,
+    cancellation: StartCancellation,
 ) -> Result<PathBuf, Error> {
     if control.load(Ordering::Acquire) == 2 {
         return Err(Error::Canceled);
     }
-    let recorder = Recorder::start(options, path)?;
+    let recorder = Recorder::start_with_cancel(options, path, cancellation)?;
     if control.load(Ordering::Acquire) == 2 {
         drop(recorder);
         return Err(Error::Canceled);

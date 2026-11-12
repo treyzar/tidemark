@@ -872,6 +872,12 @@ impl Island {
                     self.home.refresh_tiles();
                 }
             }
+            ShellEvent::ClipboardFiles(key, paths) => {
+                self.clipboard.receive_files(key, paths);
+                if self.home.root.is_mapped() {
+                    self.home.refresh_tiles();
+                }
+            }
             ShellEvent::ClipboardWritten {
                 request,
                 peer,
@@ -941,8 +947,11 @@ impl Island {
                 self.update_input_region();
             }
             ShellEvent::Shortcut(ShortcutId::LikeTrack) => {
-                self.status
-                    .set_text("Лайки Yandex Music пока недоступны; действие не выполнено.");
+                self.expand();
+                self.show_tab("home");
+                if !self.home.toggle_favorite() {
+                    self.status.set_text("Для лайка нужен текущий трек Яндекс Музыки; дождитесь завершения предыдущего действия.");
+                }
             }
             ShellEvent::Bindings(results) => {
                 let failed: Vec<_> = results
@@ -1018,6 +1027,7 @@ impl Island {
                         .set_text("Активные таймеры препятствуют безопасному перезапуску.");
                     return;
                 }
+                island.clipboard.flush_persistence();
                 island.notes.save_now();
                 let saved =
                     (|| -> std::io::Result<()> {
@@ -1113,6 +1123,7 @@ impl Island {
     }
 
     pub fn save_all(&self) {
+        self.clipboard.flush_persistence();
         self.notes.save_now();
         self.shared.notes.borrow().save();
         self.shared.config.borrow().save();

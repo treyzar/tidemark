@@ -2,8 +2,12 @@
 //! this page can always add the text currently in the clipboard while the
 //! island has focus, and it never pretends that a failed operation worked.
 
+use crate::services::shell::state::{SaveQueue, SaveSnapshot};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use gtk::gdk;
 use gtk::glib;
@@ -28,6 +32,21 @@ pub struct ClipboardView {
     write_serial: Cell<u64>,
     pending_write: RefCell<Option<(u64, Peer)>>,
     me: RefCell<Option<Weak<Self>>>,
+    saves: Option<Arc<SaveQueue>>,
+    save_worker: RefCell<Option<JoinHandle<()>>>,
+    save_serial: Cell<u64>,
+    saving: Cell<bool>,
+}
+
+impl Drop for ClipboardView {
+    fn drop(&mut self) {
+        if let Some(queue) = &self.saves {
+            queue.close();
+        }
+        if let Some(worker) = self.save_worker.get_mut().take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl ClipboardView {
@@ -60,6 +79,50 @@ impl ClipboardView {
         status.add_css_class("tiny");
         root.append(&status);
 
+        let queue = Arc::new(SaveQueue::default());
+        let worker_queue = queue.clone();
+        let worker = if shared.smoke {
+            None
+        } else {
+            std::thread::Builder::new()
+                .name("clipboard-history-save".into())
+                .spawn(move || {
+                    let mut deferred_cleanup = Vec::new();
+                    while let Some(job) = worker_queue.take() {
+                        for name in &job.dropped {
+                            if !deferred_cleanup.contains(name) {
+                                deferred_cleanup.push(name.clone());
+                            }
+                        }
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let result = tidemark_core::paths::write_atomic(
+                                &clip_history::dir().join("history.json"),
+                                job.json.as_bytes(),
+                            )
+                            .map_err(|error| error.to_string());
+                            if result.is_ok() {
+                                // A failed earlier write must not lose cleanup, and a
+                                // restored image must not be removed by an older snapshot.
+                                let history: clip_history::History =
+                                    serde_json::from_str(&job.json)
+                                        .map_err(|error| error.to_string())?;
+                                deferred_cleanup.retain(|name| {
+                                    !history.items.iter().any(|item|
+                                    matches!(&item.entry, Entry::Image { file, .. } if file == name)
+                                )
+                                });
+                                delete_images(&deferred_cleanup);
+                                deferred_cleanup.clear();
+                            }
+                            result
+                        }))
+                        .unwrap_or_else(|_| Err("Поток сохранения прерван".into()));
+                        worker_queue.complete(job.serial, result);
+                    }
+                })
+                .ok()
+        };
+        let saves = worker.as_ref().map(|_| queue);
         let view = Rc::new(Self {
             root,
             shared,
@@ -72,6 +135,10 @@ impl ClipboardView {
             write_serial: Cell::new(0),
             pending_write: RefCell::new(None),
             me: RefCell::new(None),
+            saves,
+            save_worker: RefCell::new(worker),
+            save_serial: Cell::new(0),
+            saving: Cell::new(false),
         });
         view.me.replace(Some(Rc::downgrade(&view)));
 
@@ -110,7 +177,7 @@ impl ClipboardView {
                     .borrow()
                     .contains(&Capability::ClipboardRead)
             {
-                "Фоновая текстовая история подключена к GNOME. Секретные данные не читаются."
+                "История текста и списков локальных файлов подключена к GNOME. Секретные данные не читаются."
             } else {
                 "GNOME не подключён: только ручное добавление текста при фокусе."
             });
@@ -129,8 +196,15 @@ impl ClipboardView {
         }
     }
     pub fn receive_text(&self, key: ReadKey, text: String) {
+        self.receive_entry(key, Entry::Text { text });
+    }
+    pub fn receive_files(&self, key: ReadKey, paths: Vec<String>) {
+        self.receive_entry(key, Entry::Files { paths });
+    }
+    fn receive_entry(&self, key: ReadKey, entry: Entry) {
         if self.shared.smoke
             || !self.shared.config.borrow().clipboard_history
+            || !self.shared.shell.borrow().accepts_read(&key)
             || !self
                 .shared
                 .shell_caps
@@ -145,19 +219,65 @@ impl ClipboardView {
             .shared
             .clip
             .borrow_mut()
-            .push(Entry::Text { text }, Shared::now_secs());
-        let saved = self.shared.clip.borrow().save_to(&clip_history::dir());
+            .push(entry, Shared::now_secs());
         self.rebuild();
-        match saved {
-            Ok(()) => {
-                delete_images(&dropped);
-                self.set_status("Текст из GNOME добавлен в историю.", false);
-            }
-            Err(error) => self.set_status(
-                &format!("Текст только в памяти: не удалось сохранить историю: {error}"),
-                true,
-            ),
+        self.persist(dropped);
+    }
+    /// Persistence fence: invoke before a synchronous Shared::save or handover.
+    /// No GTK access occurs on the save worker; this drains all earlier writes.
+    pub fn flush_persistence(&self) {
+        if let Some(queue) = &self.saves {
+            queue.flush();
         }
+    }
+
+    fn persist(&self, dropped: Vec<String>) {
+        let json = match serde_json::to_string(&*self.shared.clip.borrow()) {
+            Ok(json) => json,
+            Err(error) => {
+                self.set_status(&format!("История только в памяти: {error}"), true);
+                return;
+            }
+        };
+        let serial = self.save_serial.get().wrapping_add(1);
+        self.save_serial.set(serial);
+        let sent = self.saves.as_ref().is_some_and(|queue| {
+            queue.submit(SaveSnapshot {
+                serial,
+                json,
+                dropped,
+            })
+        });
+        if !sent {
+            self.set_status("История только в памяти: сохранение недоступно", true);
+            return;
+        }
+        self.set_status("Изменение в памяти; сохраняем историю…", false);
+        if self.saving.replace(true) {
+            return;
+        }
+        let Some(view) = self.weak().upgrade() else {
+            return;
+        };
+        let hold = gtk::gio::Application::default().map(|app| app.hold());
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            let _keep_alive = &hold;
+            while let Some((finished, result)) =
+                view.saves.as_ref().and_then(|queue| queue.result())
+            {
+                if finished == view.save_serial.get() {
+                    view.saving.set(false);
+                    match result {
+                        Ok(()) => view.set_status("История сохранена локально.", false),
+                        Err(error) => {
+                            view.set_status(&format!("История только в памяти: {error}"), true)
+                        }
+                    }
+                    return glib::ControlFlow::Break;
+                }
+            }
+            glib::ControlFlow::Continue
+        });
     }
     pub fn written(&self, request: u64, peer: Peer, result: Result<(), ShellError>) {
         if self.pending_write.borrow().as_ref() != Some(&(request, peer.clone())) {
@@ -191,10 +311,8 @@ impl ClipboardView {
             let mut history = self.shared.clip.borrow_mut();
             history.push(Entry::Text { text }, Shared::now_secs())
         };
-        delete_images(&dropped);
-        self.shared.clip.borrow().save();
         self.rebuild();
-        self.set_status("Текущий текст добавлен в историю.", false);
+        self.persist(dropped);
     }
 
     fn clear_unpinned(&self) {
@@ -210,10 +328,8 @@ impl ClipboardView {
             self.set_status("Нет незакреплённых записей.", false);
             return;
         };
-        delete_images(&dropped);
-        self.shared.clip.borrow().save();
         self.rebuild();
-        self.set_status("Незакреплённые записи удалены.", false);
+        self.persist(dropped);
     }
 
     fn rebuild(&self) {
@@ -347,6 +463,9 @@ impl ClipboardView {
     }
 
     fn copy(&self, index: usize) {
+        if self.shared.smoke {
+            return;
+        }
         let entry = self
             .shared
             .clip
@@ -404,8 +523,8 @@ impl ClipboardView {
     fn toggle_pin(&self, index: usize) {
         let changed = self.shared.clip.borrow_mut().toggle_pin(index);
         if changed {
-            self.shared.clip.borrow().save();
             self.rebuild();
+            self.persist(Vec::new());
         }
     }
 
@@ -423,10 +542,8 @@ impl ClipboardView {
             }
         };
         if let Some(dropped) = dropped {
-            delete_images(&dropped);
-            self.shared.clip.borrow().save();
             self.rebuild();
-            self.set_status("Запись удалена.", false);
+            self.persist(dropped);
         }
     }
 
@@ -467,8 +584,10 @@ fn copy_image(file: &str) -> Result<(), String> {
         return Err("Нет доступного дисплея для буфера.".into());
     };
     let provider = gdk::ContentProvider::for_value(&texture.to_value());
-    display.clipboard().set_content(Some(&provider));
-    Ok(())
+    display
+        .clipboard()
+        .set_content(Some(&provider))
+        .map_err(|error| format!("Не удалось записать картинку в буфер: {error}"))
 }
 
 fn copy_files(paths: &[String]) -> Result<(), String> {
@@ -486,12 +605,14 @@ fn copy_files(paths: &[String]) -> Result<(), String> {
         "text/uri-list",
         &glib::Bytes::from(lines.join("\r\n").as_bytes()),
     );
-    display.clipboard().set_content(Some(&provider));
-    Ok(())
+    display
+        .clipboard()
+        .set_content(Some(&provider))
+        .map_err(|error| format!("Не удалось записать список файлов в буфер: {error}"))
 }
 
 fn image_path(file: &str) -> Option<std::path::PathBuf> {
-    if file.is_empty() || file.contains(['/', '\\']) || file == ".." {
+    if !crate::services::shell::state::owned_image_name(file) {
         return None;
     }
     let path = clip_history::dir().join(file);

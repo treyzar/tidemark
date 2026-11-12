@@ -66,6 +66,11 @@ pub fn run(smoke: bool) {
             if let Some(agent) = state.agent.borrow_mut().take() {
                 agent.shutdown();
             }
+            if !state.smoke {
+                if let Some(island) = state.island.borrow().as_ref() {
+                    island.save_all();
+                }
+            }
         });
     }
     {
@@ -125,12 +130,8 @@ fn ensure_ui(app: &adw::Application, state: &Rc<AppState>) {
 
     let island = Island::build(app, shared);
     {
-        let weak = Rc::downgrade(&island);
         let app = app.downgrade();
         island.window.connect_close_request(move |_| {
-            if let Some(island) = weak.upgrade() {
-                island.save_all();
-            }
             // Closing the island ends the application even while settings
             // remain open; later activations start a fresh primary instance.
             if let Some(app) = app.upgrade() {

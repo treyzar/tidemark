@@ -1,7 +1,7 @@
 use crate::{
     portal::Session,
     process::{Encoder, Output},
-    shutdown_action, Error, Options, Result, ShutdownAction, Status,
+    shutdown_action, Error, Options, Result, ShutdownAction, StartCancellation, Status,
 };
 use std::{
     path::{Path, PathBuf},
@@ -36,6 +36,7 @@ struct Runtime {
     state: Mutex<Progress>,
     control: AtomicU8,
     child_live: AtomicBool,
+    cancellation: StartCancellation,
 }
 impl Runtime {
     fn new() -> Self {
@@ -46,6 +47,7 @@ impl Runtime {
             }),
             control: AtomicU8::new(0),
             child_live: AtomicBool::new(false),
+            cancellation: StartCancellation::default(),
         }
     }
     fn status(&self) -> Status {
@@ -57,6 +59,7 @@ impl Runtime {
     }
     fn canceled(&self) -> bool {
         self.control.load(Ordering::Acquire) == 2
+            || self.cancellation.is_canceled()
             || SHUTTING_DOWN.load(Ordering::Acquire) && self.status() == Status::Starting
     }
     fn request_stop(&self) {
@@ -77,9 +80,16 @@ pub struct Recorder {
 }
 impl Recorder {
     pub fn start(options: Options, path: impl AsRef<Path>) -> Result<Self> {
+        Self::start_with_cancel(options, path, StartCancellation::default())
+    }
+    pub fn start_with_cancel(
+        options: Options,
+        path: impl AsRef<Path>,
+        cancellation: StartCancellation,
+    ) -> Result<Self> {
         let path = path.as_ref();
         options.validate(path)?;
-        if SHUTTING_DOWN.load(Ordering::Acquire) {
+        if cancellation.is_canceled() || SHUTTING_DOWN.load(Ordering::Acquire) {
             return Err(Error::Canceled);
         }
         if path.exists() {
@@ -89,7 +99,10 @@ impl Recorder {
         if !std::fs::metadata(crate::process::EXECUTABLE).is_ok_and(|m| m.is_file()) {
             return Err(Error::Encoder);
         }
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime {
+            cancellation,
+            ..Runtime::new()
+        });
         {
             let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
             if SHUTTING_DOWN.load(Ordering::Acquire) {
@@ -222,10 +235,21 @@ fn prepare_and_run(
     runtime: &Runtime,
     ready: &mpsc::SyncSender<Result<()>>,
 ) -> Result<PathBuf> {
+    prepare_with_portal(options, path, runtime, ready, || {
+        Session::open_with_cancel(options, &|| runtime.canceled())
+    })
+}
+fn prepare_with_portal(
+    options: &Options,
+    path: &Path,
+    runtime: &Runtime,
+    ready: &mpsc::SyncSender<Result<()>>,
+    open: impl FnOnce() -> Result<(Session, std::os::fd::OwnedFd)>,
+) -> Result<PathBuf> {
     if runtime.canceled() {
         return Err(Error::Canceled);
     }
-    let (mut session, remote) = Session::open(options)?;
+    let (mut session, remote) = open()?;
     if runtime.canceled() {
         return Err(Error::Canceled);
     }
@@ -246,6 +270,20 @@ fn prepare_and_run(
     session.health()?;
     run(encoder, session, output, options, runtime, ready)
 }
+#[cfg(test)]
+pub(crate) fn test_prepare_with_portal(
+    options: &Options,
+    path: &Path,
+    cancellation: StartCancellation,
+    open: impl FnOnce() -> Result<(Session, std::os::fd::OwnedFd)>,
+) -> Result<PathBuf> {
+    let runtime = Runtime {
+        cancellation,
+        ..Runtime::new()
+    };
+    let (ready, _) = mpsc::sync_channel(1);
+    prepare_with_portal(options, path, &runtime, &ready, open)
+}
 fn run(
     mut encoder: Encoder,
     mut session: Session,
@@ -259,7 +297,7 @@ fn run(
     let mut next_health = Instant::now();
     let result = (|| loop {
         let command = runtime.control.load(Ordering::Acquire);
-        if command == 2 {
+        if command == 2 || runtime.cancellation.is_canceled() {
             return Err(Error::Canceled);
         }
         if output.len()? >= options.max_bytes {
@@ -297,7 +335,7 @@ fn run(
                 .unwrap_or_else(|p| p.into_inner())
                 .status = Status::Stopping;
             encoder.finish_with_abort(options.stop_timeout, || {
-                runtime.control.load(Ordering::Acquire) == 2
+                runtime.control.load(Ordering::Acquire) == 2 || runtime.cancellation.is_canceled()
             })?;
             return output.commit();
         }

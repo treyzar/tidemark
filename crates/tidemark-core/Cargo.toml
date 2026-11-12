@@ -1,6 +1,6 @@
 [package]
 name = "tidemark-core"
-version = "1.3.0"
+version = "1.4.0-beta.1"
 edition = "2021"
 description = "Platform-neutral Tidemark models and contracts shared by the Windows and Linux apps"
 publish = false

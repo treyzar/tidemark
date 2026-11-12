@@ -94,6 +94,7 @@ pub enum Event {
         key: Option<ReadKey>,
     },
     ClipboardText(ReadKey, String),
+    ClipboardFiles(ReadKey, Vec<String>),
     ClipboardWritten {
         request: u64,
         peer: Peer,
@@ -148,6 +149,9 @@ impl Service {
     /// still owns the queued notification/cache and retries queue pressure.
     pub fn set_clipboard_capture(&self, enabled: bool) {
         self.capture_policy.publish(enabled);
+    }
+    pub fn accepts_read(&self, key: &ReadKey) -> bool {
+        self.capture_policy.accepts_read(key)
     }
     pub fn send(&self, command: Command) -> bool {
         if let Command::CaptureClipboard(enabled) = &command {
@@ -262,8 +266,8 @@ async fn session(
     let mut authenticated = false;
     let mut clipboard = state::ClipboardGuard::default();
     let mut observed_policy = capture_policy.snapshot();
-    clipboard.enable(observed_policy.enabled());
-    let (read_tx, read_rx) = mpsc::sync_channel::<(ReadKey, Result<String, ShellError>)>(1);
+    clipboard.set_policy(observed_policy);
+    let (read_tx, read_rx) = mpsc::sync_channel::<(ReadKey, Result<state::Content, ShellError>)>(1);
     let mut reading = false;
     let mut attempted: Option<ReadKey> = None;
     let mut pending_owner = None;
@@ -405,8 +409,11 @@ async fn session(
                 && authenticated
             {
                 match result {
-                    Ok(text) => {
+                    Ok(state::Content::Text(text)) => {
                         let _ = events.send(Event::ClipboardText(key, text));
+                    }
+                    Ok(state::Content::Files(paths)) => {
+                        let _ = events.send(Event::ClipboardFiles(key, paths));
                     }
                     Err(error) => {
                         let _ = events.send(Event::Error(error));
@@ -576,8 +583,7 @@ fn sync_capture_policy(
 ) {
     let current = policy.snapshot();
     if current != *observed {
-        clipboard.invalidate();
-        clipboard.enable(current.enabled());
+        clipboard.set_policy(current);
         *observed = current;
         *attempted = None;
     }
@@ -739,7 +745,7 @@ async fn read_clipboard(
     key: &ReadKey,
     policy: &state::CapturePolicy,
     expected_policy: state::CaptureState,
-) -> Result<String, ShellError> {
+) -> Result<state::Content, ShellError> {
     if !policy.permits(expected_policy) {
         return Err(ShellError::Failed(
             "Фоновая история буфера выключена".into(),
@@ -756,7 +762,7 @@ async fn read_clipboard(
     let message = proxy
         .call_method(
             "GetClipboardBounded",
-            &(key.mime.as_str(), state::MAX_TEXT_BYTES as u32),
+            &(key.mime.as_str(), state::byte_limit(&key.mime) as u32),
         )
         .await
         .map_err(map_clipboard_read_error)?;
@@ -769,7 +775,7 @@ async fn read_clipboard(
     let (bytes,): (&[u8],) = body
         .deserialize()
         .map_err(|error| ShellError::Failed(error.to_string()))?;
-    state::text(bytes).map_err(ShellError::Failed)
+    state::content(&key.mime, bytes).map_err(ShellError::Failed)
 }
 fn map_clipboard_read_error(error: zbus::Error) -> ShellError {
     match &error {
@@ -804,7 +810,10 @@ async fn write_clipboard(
 }
 
 fn shortcut_bindings(launcher_enabled: bool) -> Vec<(&'static str, &'static str)> {
-    let mut bindings = vec![("toggle_theme", "<Super><Alt>t")];
+    let mut bindings = vec![
+        ("toggle_theme", "<Super><Alt>t"),
+        ("like_track", "<Super><Alt>l"),
+    ];
     if launcher_enabled {
         bindings.push(("launcher", "<Super><Alt>space"));
     }
@@ -1104,7 +1113,10 @@ mod tests {
     fn disabled_launcher_releases_search_binding_and_preserves_theme() {
         assert_eq!(
             shortcut_bindings(false),
-            vec![("toggle_theme", "<Super><Alt>t")]
+            vec![
+                ("toggle_theme", "<Super><Alt>t"),
+                ("like_track", "<Super><Alt>l")
+            ]
         );
         assert!(shortcut_bindings(true).contains(&("launcher", "<Super><Alt>space")));
     }

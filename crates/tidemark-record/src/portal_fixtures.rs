@@ -336,3 +336,50 @@ fn timeout_wrong_path_sender_and_owner_fail_closed_with_cleanup() {
         assert_eq!(f.requests.load(Ordering::SeqCst), 1);
     }
 }
+#[test]
+fn ui_cancel_during_pending_consent_closes_request_without_output_or_encoder() {
+    let f = fixture(Mode::Timeout);
+    let cancellation = crate::StartCancellation::default();
+    let flag = cancellation.clone();
+    let order = f.order.clone();
+    let canceler = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !order.lock().unwrap().contains(&"Start") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        flag.cancel();
+    });
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("canceled.webm");
+    let result =
+        crate::recorder::test_prepare_with_portal(&options(), &path, cancellation.clone(), || {
+            async_io::block_on(
+                f.client
+                    .prepare_with_cancel(&options(), &|| cancellation.is_canceled()),
+            )
+        });
+    canceler.join().unwrap();
+    assert_eq!(result, Err(Error::Canceled));
+    assert!(!path.exists());
+    assert!(!f.order.lock().unwrap().contains(&"OpenPipeWireRemote"));
+    assert_eq!(f.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(f.sessions.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn late_portal_acceptance_after_ui_cancel_cannot_create_output_or_launch_encoder() {
+    let f = fixture(Mode::Success);
+    let cancellation = crate::StartCancellation::default();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("late.webm");
+    let result =
+        crate::recorder::test_prepare_with_portal(&options(), &path, cancellation.clone(), || {
+            let accepted = async_io::block_on(f.client.prepare(&options()));
+            cancellation.cancel();
+            accepted
+        });
+    assert_eq!(result, Err(Error::Canceled));
+    assert!(!path.exists());
+    assert!(folder.path().read_dir().unwrap().next().is_none());
+    assert_eq!(f.sessions.load(Ordering::SeqCst), 1);
+}

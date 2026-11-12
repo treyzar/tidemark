@@ -9,7 +9,7 @@ cd -- "$root"
     echo 'Build the Ubuntu package on Linux x86_64.' >&2
     exit 1
 }
-for tool in cargo python3 dpkg-deb desktop-file-validate; do
+for tool in cargo python3 dpkg dpkg-deb desktop-file-validate; do
     command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
 done
 
@@ -18,6 +18,15 @@ version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/linux/Cargo.
     echo 'Invalid package version.' >&2
     exit 1
 }
+# Debian sorts '~' before a final release; a SemVer '-' would instead become
+# a revision and make the beta newer than the corresponding stable package.
+deb_version=${version/-/~}
+if [[ "$version" == *-* ]]; then
+    dpkg --compare-versions "$deb_version" lt "${version%%-*}" || {
+        echo 'Prerelease package must sort before its stable version.' >&2
+        exit 1
+    }
+fi
 cargo build --release --locked --manifest-path apps/linux/Cargo.toml
 cargo build --release --locked --manifest-path crates/tidemark-agent/Cargo.toml --bin island-hook
 
@@ -50,7 +59,7 @@ if [[ -d "$extension_dir/schemas" ]]; then
     glib-compile-schemas --strict "$extension_dir/schemas"
 fi
 
-sed "s/@VERSION@/$version/g" installer/linux/control.in > "$stage/DEBIAN/control"
+sed "s/@VERSION@/$deb_version/g" installer/linux/control.in > "$stage/DEBIAN/control"
 chmod 0755 "$stage/DEBIAN"
 chmod 0644 "$stage/DEBIAN/control"
 output="$root/dist/tidemark-${version}-ubuntu-amd64.deb"

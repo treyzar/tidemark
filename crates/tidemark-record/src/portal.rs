@@ -38,7 +38,10 @@ pub(crate) struct Session {
     pub serial: Option<u64>,
 }
 impl Session {
-    pub fn open(options: &Options) -> Result<(Self, OwnedFd)> {
+    pub fn open_with_cancel(
+        options: &Options,
+        canceled: &dyn Fn() -> bool,
+    ) -> Result<(Self, OwnedFd)> {
         async_io::block_on(async {
             let conn = deadline(Duration::from_secs(2), async {
                 zbus::connection::Builder::session()
@@ -53,7 +56,7 @@ impl Session {
                 conn,
                 service: SERVICE.into(),
             }
-            .prepare(options)
+            .prepare_with_cancel(options, canceled)
             .await
         })
     }
@@ -120,7 +123,18 @@ impl Client {
         })
         .await
     }
+    #[cfg(test)]
     async fn prepare(&self, options: &Options) -> Result<(Session, OwnedFd)> {
+        self.prepare_with_cancel(options, &|| false).await
+    }
+    async fn prepare_with_cancel(
+        &self,
+        options: &Options,
+        canceled: &dyn Fn() -> bool,
+    ) -> Result<(Session, OwnedFd)> {
+        if canceled() {
+            return Err(Error::Canceled);
+        }
         let owner = match self.owner().await {
             Ok(o) => o,
             Err(_) if self.service == SERVICE => {
@@ -138,9 +152,19 @@ impl Client {
             request: RefCell::new(None),
             session: RefCell::new(None),
         };
-        let result = deadline(
-            options.portal_timeout,
-            self.configure(options, &owner, &cleanup),
+        let result = future::or(
+            deadline(
+                options.portal_timeout,
+                self.configure(options, &owner, &cleanup),
+            ),
+            async {
+                loop {
+                    if canceled() {
+                        return Err(Error::Canceled);
+                    }
+                    async_io::Timer::after(Duration::from_millis(20)).await;
+                }
+            },
         )
         .await;
         let request = cleanup.request.borrow_mut().take();

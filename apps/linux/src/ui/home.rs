@@ -340,6 +340,16 @@ impl HomeView {
         self.navigate.replace(Some(Box::new(callback)));
     }
 
+    pub fn toggle_favorite(&self) -> bool {
+        // Use the same pinned-track, single-request path as the visible button.
+        // A shortcut must not bypass smoke mode or an in-flight request.
+        if self.shared.smoke || !self.favorite_button.is_sensitive() {
+            return false;
+        }
+        self.favorite_button.emit_clicked();
+        true
+    }
+
     pub fn set_window_context(&self, focus: Option<FocusInfo>, available: bool) {
         let changed = self.window_available.get() != available
             || self.window_context.borrow().as_ref() != focus.as_ref();

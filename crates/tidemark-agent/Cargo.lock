@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-agent"
-version = "1.3.0"
+version = "1.4.0-beta.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-core"
-version = "1.3.0"
+version = "1.4.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
