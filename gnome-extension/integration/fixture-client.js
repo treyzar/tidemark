@@ -27,6 +27,9 @@ import System from 'system';
 import * as C from './contract.js';
 
 Gio._promisify(Gio.DBusConnection.prototype, 'call');
+// Fail visibly instead of being terminated if the bus drops this connection.
+Gio.DBus.session.set_exit_on_close(false);
+Gio.DBus.session.connect('closed', () => record('FAIL', false, 'session bus connection closed', ''));
 
 const OUT = GLib.getenv('TIDEMARK_HARNESS_DIR');
 const VICTIM = GLib.getenv('TIDEMARK_VICTIM');
@@ -184,6 +187,35 @@ function openWindow(title, width, height, decorated) {
     return win;
 }
 
+async function activateVictim() {
+    for (let i = 0; i < 50; i++) {
+        const done = await shellEval(`(() => {
+            const w = global.get_window_actors().map(a => a.meta_window).find(w => w.get_title() === 'tidemark-victim');
+            if (!w) return false;
+            Main.activateWindow(w);
+            return true;
+        })()`);
+        if (done)
+            return;
+        await sleep(200);
+    }
+    throw new Error('victim window never appeared in Mutter');
+}
+
+async function victimCall(method, signature, args) {
+    for (let i = 0; i < 50; i++) {
+        try {
+            return await bus.call('org.tidemark.HarnessVictim', '/org/tidemark/HarnessVictim', 'org.tidemark.HarnessVictim',
+                method, new GLib.Variant(signature, args), null, Gio.DBusCallFlags.NONE, 10000, null);
+        } catch (e) {
+            if (!Gio.DBusError.get_remote_error(e)?.endsWith('ServiceUnknown'))
+                throw e;
+            await sleep(200);
+        }
+    }
+    throw new Error('victim never appeared on the bus');
+}
+
 function spawnVictim(extraEnv = {}) {
     const launcher = new Gio.SubprocessLauncher({ flags: Gio.SubprocessFlags.NONE });
     // Not our trusted Wayland socket: a normal, separate client.
@@ -244,12 +276,16 @@ async function phase1() {
         assert(e?.name === `${C.ERROR_PREFIX}.InvalidArgs`, JSON.stringify(e));
     });
 
+    // The island (shown first) keeps keyboard focus: a new window does not
+    // steal it without user input. Simulate the user clicking the victim, via
+    // the oracle, then expect the adapter to report it.
     const victimAt = signals.length;
-    const victim = spawnVictim({ TIDEMARK_VICTIM_CLIPBOARD_BYTES: String(C.MAX_CLIPBOARD_BYTES + 1) });
+    const victim = spawnVictim();
     const victimPid = Number(victim.get_identifier());
     let victimId = null;
     await check('FocusChanged describes another app window (serde keys, real pid)', async () => {
-        const [focus] = await waitSignal('FocusChanged', a => a[0]?.title === 'tidemark-victim', 15000, victimAt);
+        await activateVictim();
+        const [focus] = await waitSignal('FocusChanged', a => a[0]?.title === 'tidemark-victim', 10000, victimAt);
         for (const k of ['id', 'app_id', 'title', 'maximized', 'above', 'opacity', 'rect', 'monitor'])
             assert(k in focus, `missing ${k}`);
         assert(focus.pid === victimPid, `pid ${focus.pid} != ${victimPid}`);
@@ -260,14 +296,34 @@ async function phase1() {
         return `id ${victimId}`;
     });
 
-    await check('oversized clipboard from another app is refused (bounded read)', async () => {
-        const offer = await waitSignal('ClipboardChanged', a => a[0].includes('text/plain'), 6000, victimAt)
-            .catch(() => { throw new Skip('victim could not take the Wayland selection in this session'); });
-        assert(offer[1] === false, 'not sensitive');
+    // Another app (the focused victim) owns the selection from here on.
+    await check('password-manager copy from another app is announced empty and unreadable', async () => {
+        const from = signals.length;
+        await victimCall('OfferBytes', '(sub)', ['text/plain', 7, true]);
+        const [mimes, sensitive] = await waitSignal('ClipboardChanged', a => a[1] === true, 5000, from);
+        assert(mimes.length === 0, `mimes leaked: ${mimes}`);
+        const e = await callError('GetClipboard', '(s)', ['text/plain'], '(ay)');
+        assert(e?.name === `${C.ERROR_PREFIX}.Failed`, JSON.stringify(e));
+        return `sensitive ${sensitive}`;
+    });
+
+    await check('oversized clipboard from another app is refused by the bounded read', async () => {
+        const from = signals.length;
+        await victimCall('OfferBytes', '(sub)', ['text/plain', C.MAX_CLIPBOARD_BYTES + 1, false]);
+        const [mimes, sensitive] = await waitSignal('ClipboardChanged', a => a[0].includes('text/plain'), 10000, from);
+        assert(sensitive === false, `sensitive ${sensitive} ${mimes}`);
         const e = await callError('GetClipboard', '(s)', ['text/plain'], '(ay)');
         assert(e?.name === `${C.ERROR_PREFIX}.Failed`, JSON.stringify(e));
         return e.message;
-    }, { optional: true });
+    });
+
+    await check('clipboard of normal size from another app is read', async () => {
+        const from = signals.length;
+        await victimCall('OfferBytes', '(sub)', ['text/plain', 1024 * 1024, false]);
+        await waitSignal('ClipboardChanged', a => a[0].includes('text/plain') && a[1] === false, 5000, from);
+        const [bytes] = await call('GetClipboard', '(s)', ['text/plain'], '(ay)');
+        assert(bytes.length === 1024 * 1024 && bytes[0] === 97, `got ${bytes.length} bytes`);
+    });
 
     if (victimId !== null) {
         const act = (action, arg) => call('WindowAction', '(tsv)', [victimId, action, arg], '(a{sv})').then(([s]) => s);
@@ -325,20 +381,9 @@ async function phase1() {
         assert(new TextDecoder().decode(back) === 'Tidemark ✓ приливы', 'content differs');
     });
 
-    await check('password-manager clipboard is announced empty and unreadable', async () => {
-        const from = signals.length;
-        await call('SetClipboard', '(say)', [C.PASSWORD_HINT_MIME, new TextEncoder().encode('secret')]);
-        const [mimes, sensitive] = await waitSignal('ClipboardChanged', a => a[1] === true, 3000, from);
-        assert(mimes.length === 0, `mimes leaked: ${mimes}`);
-        const e = await callError('GetClipboard', '(s)', [C.PASSWORD_HINT_MIME], '(ay)');
-        assert(e?.name === `${C.ERROR_PREFIX}.Failed`, JSON.stringify(e));
-        return `sensitive ${sensitive}`;
-    });
-
-    await check('SetClipboard over 64 MiB is InvalidArgs', async () => {
-        const e = await callError('SetClipboard', '(say)', ['text/plain', new Uint8Array(C.MAX_CLIPBOARD_BYTES + 1)]);
-        assert(e?.name === `${C.ERROR_PREFIX}.InvalidArgs`, JSON.stringify(e));
-    });
+    // SetClipboard over 64 MiB is not exercised here: such a message exceeds
+    // the bus limits and the bus would close the caller's connection before
+    // the adapter sees it. The adapter's own bound is covered by the mock tests.
 
     await check('Screenshot is Unsupported with the capability name', async () => {
         const e = await callError('Screenshot', '(bb(iiii))', [false, false, [0, 0, 0, 0]], '(ay)');

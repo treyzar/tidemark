@@ -153,7 +153,7 @@ export class GnomePlatform {
         launcher.setenv(C.ENV_MARKER, String(C.CONTRACT_VERSION), true);
         let wayland = null;
         let proc;
-        if (Meta.is_wayland_compositor()) {
+        if (isWaylandCompositor()) {
             if (typeof Meta.WaylandClient.new_subprocess === 'function') {
                 wayland = Meta.WaylandClient.new_subprocess(global.context, launcher, argv);
                 proc = wayland.get_subprocess();
@@ -234,14 +234,35 @@ export class GnomePlatform {
         return TRACKED_TYPES.includes(w.get_window_type()) && !w.is_skip_taskbar();
     }
 
-    /** Island/overlay: on all workspaces, above other windows, not in Alt+Tab. */
+    /**
+     * Island/overlay: on all workspaces, above other windows, not in Alt+Tab.
+     * Applied from a BEFORE_REDRAW later, not inside window-created: there
+     * the window may not be stacked yet, and make_above()/stick() then hit
+     * Mutter's "window->stack_position >= 0" assertion (seen on 46.2 in CI).
+     */
     prepareChrome(w) {
-        w.stick();
-        w.make_above();
-        if (typeof w.hide_from_window_list === 'function')
-            w.hide_from_window_list();
-        else if (liveClient?.wayland && w.get_client_type() === Meta.WindowClientType.WAYLAND)
-            liveClient.wayland.hide_from_window_list(w);
+        const apply = () => {
+            if (!this._windowSignals.has(w))
+                return; // unmanaged meanwhile
+            w.stick();
+            w.make_above();
+            if (typeof w.hide_from_window_list === 'function')
+                w.hide_from_window_list();
+            else if (liveClient?.wayland && w.get_client_type() === Meta.WindowClientType.WAYLAND)
+                liveClient.wayland.hide_from_window_list(w);
+        };
+        const laters = global.compositor?.get_laters?.();
+        if (laters) {
+            laters.add(Meta.LaterType.BEFORE_REDRAW, () => {
+                apply();
+                return GLib.SOURCE_REMOVE;
+            });
+        } else {
+            GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                apply();
+                return GLib.SOURCE_REMOVE;
+            });
+        }
     }
 
     describe(w) {
@@ -408,6 +429,16 @@ export class GnomePlatform {
     capsLock() {
         return this._keymap.get_caps_lock_state();
     }
+}
+
+/**
+ * Mutter 46-48 export Meta.is_wayland_compositor(); Mutter 50 (X11 session
+ * removed) no longer does and is always a Wayland compositor. Found by the
+ * headless harness on Ubuntu 26.04: calling it there threw and no client
+ * was ever launched.
+ */
+function isWaylandCompositor() {
+    return typeof Meta.is_wayland_compositor === 'function' ? Meta.is_wayland_compositor() : true;
 }
 
 function isMaximized(w) {

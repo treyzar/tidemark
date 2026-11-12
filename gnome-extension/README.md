@@ -169,17 +169,18 @@ CI=true TIDEMARK_HARNESS_ARTIFACT_DIR="$PWD/gnome-harness-artifacts"   bash gnom
 | Phase 1 (launched PID) | open properties before `Hello` (`ClientState` `starting`); `Hello` → `running` with snapshot `FocusChanged({})` = None, `CapsLock`, `MaximizedTopChanged` |
 | Island | Mutter frame is top-centred below the panel; above, sticky, skip-taskbar |
 | Place | unknown role → `InvalidArgs` |
-| Focus | `FocusChanged` for the victim with serde keys, `(iiii)` rect and the victim's real PID; `GetFocus` agrees |
+| Focus | the victim is activated through the oracle, as a user click would (a new window does not take focus from the island without input); `FocusChanged` for the victim with serde keys, `(iiii)` rect and the victim's real PID; `GetFocus` agrees |
 | Window actions | `set_above`, `set_opacity` (and the floor), `tile_left` (Mutter frame = left half of the work area), `toggle_maximize` + `MaximizedTopChanged`, minimize/activate; actions on the island refused |
-| Clipboard | text round trip through `Meta.Selection`; password hint → `([], true)` and unreadable; `SetClipboard` > 64 MiB → `InvalidArgs`; Screenshot → `Unsupported`/`screenshot` |
+| Clipboard | the victim (another app, focused) offers content: text + password hint → `([], true)` and unreadable; 64 MiB + 1 → refused by the bounded read; 1 MiB → read intact; the adapter's own `SetClipboard` round trip through `Meta.Selection`; Screenshot → `Unsupported`/`screenshot` |
 | Shortcuts | defaults grabbed, `<Alt>space` reported taken |
 | Crash | the victim is dimmed to 179, then the fixture exits with status 3 |
 | Phase 2 (restarted PID) | the new PID is authenticated after `Hello` (`starting` → `running`); the victim's opacity is back to 255 |
-| `[optional]` (reported, fatal only with `TIDEMARK_HARNESS_STRICT=1`) | a > 64 MiB clipboard offered by the victim is refused by the bounded read (needs the victim to own the Wayland selection); Super+Alt+Space, Caps Lock and the input-source switch via a Clutter virtual keyboard |
+| `[optional]` (reported, fatal only with `TIDEMARK_HARNESS_STRICT=1`) | Super+Alt+Space, Caps Lock and the input-source switch via a Clutter virtual keyboard |
 
 **What the harness cannot show:**
 - **Status:** it has not been run yet. It was written on Windows; only `bash -n`, `node --check` and the static tests in `tests/integration-files.test.js` ran.
 - **Expected first-run friction:** headless GL/llvmpipe, dconf activation, the startup overview, and Wayland selection rules for the victim.
+- **`SetClipboard` over 64 MiB** is not sent in the harness: the bus closes the connection of a sender that exceeds its message limit (seen in CI), so the adapter's own bound is covered by the mock tests.
 - **Not covered at all:**
   - GNOME 50 (Ubuntu 26.04) and the Xorg session;
   - real input focus behaviour when clicking the island;

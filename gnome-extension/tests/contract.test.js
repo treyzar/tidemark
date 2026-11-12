@@ -195,3 +195,15 @@ test('Unsupported errors map methods to capability wire names', () => {
         assert.ok(flat.includes(`${method} ${cap}`), `XML documents ${method} -> ${cap}`);
     }
 });
+
+test('version-sensitive Mutter calls are feature-detected', () => {
+    const platform = readFileSync(new URL('gnomePlatform.js', EXT), 'utf8');
+    // Removed in Mutter 50: may only be called behind a typeof check.
+    const code = platform.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join('\n');
+    const calls = code.match(/Meta\.is_wayland_compositor\(\)/g) ?? [];
+    assert.equal(calls.length, 1, 'exactly one, guarded call');
+    assert.match(platform, /typeof Meta\.is_wayland_compositor === 'function' \? Meta\.is_wayland_compositor\(\) : true/);
+    assert.match(platform, /typeof Meta\.WaylandClient\.new_subprocess === 'function'/);
+    assert.match(platform, /typeof w\.hide_from_window_list === 'function'/);
+    assert.match(platform, /typeof w\.get_maximized === 'function'/);
+});
