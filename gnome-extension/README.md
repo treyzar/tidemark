@@ -149,7 +149,7 @@ These tests cannot prove the GNOME calls themselves: `gnomePlatform.js` and `dbu
   - a one-time token from the root, consumed on use;
   - that the root and XDG paths are validated, owned by the user and mode 700;
   - that it runs on a session bus different from the caller's, on which `org.gnome.Shell` is not present.
-- The extension state is polled (up to 30 s) until it is ACTIVE, ERROR or OUT_OF_DATE.
+- The extension state is polled (up to 30 s) until it is ACTIVE with no error. GNOME 46 and 50 temporarily expose ERROR (`3`) with an empty error during asynchronous loading; that sentinel is allowed to settle, while a reported error or OUT_OF_DATE fails immediately. A persistent sentinel fails the ACTIVE deadline. After the fixture, ACTIVE and an empty `GetExtensionErrors` history are required again.
 
 **How it drives the adapter:**
 - The adapter launches `integration/fixture-client.js` through the developer override `TIDEMARK_ADAPTER_CLIENT` (absolute path, executable).
@@ -178,11 +178,10 @@ CI=true TIDEMARK_HARNESS_ARTIFACT_DIR="$PWD/gnome-harness-artifacts"   bash gnom
 | `[optional]` (reported, fatal only with `TIDEMARK_HARNESS_STRICT=1`) | Super+Alt+Space, Caps Lock and the input-source switch via a Clutter virtual keyboard |
 
 **What the harness cannot show:**
-- **Status:** it has not been run yet. It was written on Windows; only `bash -n`, `node --check` and the static tests in `tests/integration-files.test.js` ran.
-- **Expected first-run friction:** headless GL/llvmpipe, dconf activation, the startup overview, and Wayland selection rules for the victim.
+- **Status:** the private headless harness has passed all 25 required and 3 optional checks on GNOME 46.2 and 50.1 in CI. The startup-state polling fix and final error-history check still require a native CI rerun; local Bash regression tests stub D-Bus and never start GNOME.
 - **`SetClipboard` over 64 MiB** is not sent in the harness: the bus closes the connection of a sender that exceeds its message limit (seen in CI), so the adapter's own bound is covered by the mock tests.
 - **Not covered at all:**
-  - GNOME 50 (Ubuntu 26.04) and the Xorg session;
+  - the Xorg session;
   - real input focus behaviour when clicking the island;
   - multi-monitor and scale changes;
   - lock-screen re-adoption;

@@ -74,14 +74,53 @@ wait_extension_active() {
         info=$(gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
             --method org.gnome.Shell.Extensions.GetExtensionInfo "$UUID" 2>&1 || true)
         state=$(grep -oE "'state': <[0-9.]+>" <<<"$info" | grep -oE '[0-9]+' | head -n1 || true)
+        if [[ -n "$state" ]] && ! grep -qF "'error': <''>" <<<"$info"; then
+            result "FAIL extension reported an error: $info"
+            return 1
+        fi
         case "$state" in
         1) result "PASS extension ACTIVE in the private shell"; return 0 ;;
-        3 | 4) result "FAIL extension state $state (ERROR/OUT_OF_DATE): $info"; return 1 ;;
+        4) result "FAIL extension OUT_OF_DATE: $info"; return 1 ;;
         esac
+        # GNOME 46.2 and 50.1 loadExtension() default to ERROR (3) before
+        # awaiting the extension import, with error:'' and canChange:false.
+        # Only the empty-error sentinel may settle; a real error fails above,
+        # and a sentinel that never reaches ACTIVE still fails the deadline.
+        # https://github.com/GNOME/gnome-shell/blob/50.1/js/ui/extensionSystem.js
         sleep 0.5
     done
     result "FAIL extension not ACTIVE after 30 s: $info"
     return 1
+}
+
+check_extension_final() {
+    local info errors
+    info=$(gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+        --method org.gnome.Shell.Extensions.GetExtensionInfo "$UUID" 2>&1 || true)
+    if ! grep -qE "'state': <1(\\.0)?>" <<<"$info" || ! grep -qF "'error': <''>" <<<"$info"; then
+        result "FAIL extension not ACTIVE and error-free after the fixture: $info"
+        return 1
+    fi
+    errors=$(gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+        --method org.gnome.Shell.Extensions.GetExtensionErrors "$UUID" 2>&1 || true)
+    if [[ "$errors" != '(@as [],)' && "$errors" != '([],)' ]]; then
+        result "FAIL extension recorded errors: $errors"
+        return 1
+    fi
+    result "PASS extension remains ACTIVE with no recorded errors after the fixture"
+}
+
+extension_log_has_errors() {
+    # GJS prints a callback error header and its indented stack on separate
+    # lines. Keep the record together: grepping only the header drops the
+    # extension path, while grepping the entire file misattributes dash errors.
+    awk -v uuid="$UUID" '
+        /JS ERROR|JS WARNING/ { in_error = 1; if (index($0, uuid)) found = 1; next }
+        in_error && /^[[:space:]]/ { if (index($0, uuid)) found = 1; next }
+        /^[[:space:]]*$/ { next }
+        { in_error = 0 }
+        END { exit !found }
+    ' "$1"
 }
 
 inner() {
@@ -142,7 +181,8 @@ inner() {
 
     result "INFO final ClientState: $(gdbus call --session --dest org.tidemark.Shell --object-path /org/tidemark/Shell \
         --method org.freedesktop.DBus.Properties.Get org.tidemark.Shell1 ClientState 2>&1 || true)"
-    if grep -E 'JS ERROR|JS WARNING' "$TIDEMARK_HARNESS_ROOT/gnome-shell.log" | grep -q "$UUID"; then
+    check_extension_final || true
+    if extension_log_has_errors "$TIDEMARK_HARNESS_ROOT/gnome-shell.log"; then
         result "FAIL gnome-shell logged JS errors from the extension"
     fi
 }

@@ -16,6 +16,12 @@ cargo run --manifest-path apps/linux/Cargo.toml
 
 The binary is `apps/linux/target/release/tidemark`. `--settings` opens settings. The GNOME adapter is in `gnome-extension/tidemark@treyzar.github.io`; installing the package does not silently enable it or change desktop settings.
 
+Artwork uses the shared `tidemark-artwork` crate: bounded HTTP/file/data reads
+and image decoding run on the media worker, producing 160×160 straight RGBA.
+The GTK thread creates `R8g8b8a8` memory textures and keeps at most eight by
+content hash. Player owner, track metadata and URI key the shared bounded retry
+schedule, including late artwork and replacement bytes at the same URI.
+
 ## Verification
 
 ```sh

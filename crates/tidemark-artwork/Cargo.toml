@@ -1,0 +1,23 @@
+[package]
+name = "tidemark-artwork"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded artwork fetch+decode for Tidemark on Ubuntu: https/http/file/data -> RGBA 160x160 cover"
+
+[workspace]
+
+[dependencies]
+thiserror = "2"
+url = "2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+sha2 = "0.11"
+base64 = "0.23"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+base64 = "0.23"
+url = "2"

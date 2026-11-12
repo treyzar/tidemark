@@ -375,14 +375,13 @@ impl Island {
         let weak = self.weak();
         // Tick callbacks precede layout: retain this for a second frame to
         // read the final allocation, then stop requesting idle redraws.
-        let mut first = true;
+        let first = Cell::new(true);
         self.root.add_tick_callback(move |_, _| {
             let Some(island) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
             island.update_input_region();
-            if first {
-                first = false;
+            if first.replace(false) {
                 glib::ControlFlow::Continue
             } else {
                 glib::ControlFlow::Break

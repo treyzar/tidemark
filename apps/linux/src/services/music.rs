@@ -5,20 +5,23 @@
 //! from a channel. A sleep timer is pinned to the player identity captured
 //! when it was armed, exactly as `SleepTimer` specifies.
 
-use std::io::Read;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tidemark_artwork::Cover;
+use tidemark_core::media_artwork::ArtworkSchedule;
 use tidemark_mpris::{Client, MprisPlayerId, SleepTimer, TrackSnapshot};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(250);
-const MAX_ARTWORK: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct NowPlaying {
     pub snapshot: TrackSnapshot,
-    pub cover: Option<Vec<u8>>,
+    pub cover: Option<Arc<Cover>>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +134,15 @@ fn worker(commands: Receiver<MusicCommand>, events: Sender<MusicEvent>) {
                 &mut last_error,
                 &events,
             );
-            next_poll = Instant::now() + POLL_INTERVAL;
+            let now = Instant::now();
+            // An unavailable D-Bus provider must consume due retries too.
+            artwork.schedule.finish_attempt(now);
+            next_poll = now
+                + artwork
+                    .schedule
+                    .wait(now)
+                    .unwrap_or(POLL_INTERVAL)
+                    .min(POLL_INTERVAL);
         }
 
         match commands.recv_timeout(TICK) {
@@ -166,6 +177,7 @@ fn handle_command(
     events: &Sender<MusicEvent>,
 ) {
     if matches!(command, MusicCommand::Refresh) {
+        artwork.schedule.invalidate();
         refresh(client, current, last_snapshot, artwork, last_error, events);
         return;
     }
@@ -286,6 +298,7 @@ fn refresh(
         *current = None;
         *last_snapshot = None;
         *last_error = None;
+        artwork.reset();
         let _ = events.send(MusicEvent::Snapshot(None));
         return;
     }
@@ -307,11 +320,7 @@ fn refresh(
 
     match connection.snapshot(&player) {
         Ok(snapshot) => {
-            let identity = track_identity(&snapshot);
-            let cover = snapshot
-                .art_url
-                .as_deref()
-                .and_then(|url| artwork.cover(&identity, url));
+            let cover = artwork.cover(&snapshot);
             *current = Some(player);
             *last_snapshot = Some(snapshot.clone());
             *last_error = None;
@@ -330,84 +339,55 @@ fn emit_error(events: &Sender<MusicEvent>, last_error: &mut Option<String>, mess
     }
 }
 
-/// Interim cache keyed by the full track identity, not just the artwork URI:
-/// players may reuse one URI while the bytes behind it change after a track
-/// switch. Retries are bounded and spaced. The reviewed artwork crate will
-/// replace the fetch path once its API is frozen.
+/// Worker cache keyed by session owner, track metadata and URI. Scheduled
+/// reads also refetch successful covers because players can replace bytes
+/// at an unchanged URL. Fetching and decoding never run on the GTK thread.
 #[derive(Default)]
 struct ArtworkCache {
-    key: String,
-    url: String,
-    bytes: Option<Vec<u8>>,
-    attempts: u8,
-    next_try: Option<Instant>,
+    key: Option<u64>,
+    cover: Option<Arc<Cover>>,
+    schedule: ArtworkSchedule,
 }
 
 impl ArtworkCache {
-    fn cover(&mut self, identity: &str, url: &str) -> Option<Vec<u8>> {
-        if self.key != identity || self.url != url {
-            self.key = identity.to_string();
-            self.url = url.to_string();
-            self.bytes = None;
-            self.attempts = 0;
-            self.next_try = None;
+    fn reset(&mut self) {
+        self.key = None;
+        self.cover = None;
+        self.schedule.reset();
+    }
+
+    fn cover(&mut self, snapshot: &TrackSnapshot) -> Option<Arc<Cover>> {
+        let key = artwork_key(snapshot);
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.cover = None;
         }
-        if let Some(bytes) = &self.bytes {
-            return Some(bytes.clone());
+        let now = Instant::now();
+        if self.schedule.needs_read(key, now) {
+            self.schedule.read(key, now);
+            // Missing URLs consume retries too, allowing late metadata
+            // without leaving a permanent busy loop or sticky None.
+            if let Some(url) = snapshot.art_url.as_deref() {
+                if let Ok(cover) = tidemark_artwork::fetch(url) {
+                    self.cover = Some(Arc::new(cover));
+                }
+            }
+            self.schedule.finish_attempt(Instant::now());
         }
-        if self.attempts >= 5 {
-            return None;
-        }
-        if self.next_try.is_some_and(|next| Instant::now() < next) {
-            return None;
-        }
-        let fetched = fetch_cover(url);
-        self.attempts += 1;
-        let delay = match self.attempts {
-            1 => 2,
-            2 => 5,
-            3 => 10,
-            4 => 20,
-            _ => 30,
-        };
-        self.next_try = Some(Instant::now() + Duration::from_secs(delay));
-        if let Some(bytes) = fetched {
-            self.bytes = Some(bytes.clone());
-            Some(bytes)
-        } else {
-            None
-        }
+        self.cover.clone()
     }
 }
 
-fn track_identity(snapshot: &TrackSnapshot) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        snapshot.track_id.as_deref().unwrap_or(""),
-        snapshot.title,
-        snapshot.artists.join(","),
-        snapshot.album.as_deref().unwrap_or("")
+fn artwork_key(snapshot: &TrackSnapshot) -> u64 {
+    let mut hash = DefaultHasher::new();
+    (
+        &snapshot.player,
+        &snapshot.track_id,
+        &snapshot.title,
+        &snapshot.artists,
+        &snapshot.album,
+        &snapshot.art_url,
     )
-}
-
-fn fetch_cover(url: &str) -> Option<Vec<u8>> {
-    if url.starts_with("file://") {
-        let path = crate::model::art_file_path(url)?;
-        let metadata = std::fs::metadata(&path).ok()?;
-        if metadata.len() > MAX_ARTWORK {
-            return None;
-        }
-        return std::fs::read(path).ok();
-    }
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return None;
-    }
-    let response = ureq::get(url).timeout(Duration::from_secs(5)).call().ok()?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_ARTWORK)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (!bytes.is_empty()).then_some(bytes)
+        .hash(&mut hash);
+    hash.finish()
 }

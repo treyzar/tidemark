@@ -1,6 +1,7 @@
 //! Home tab: live MPRIS card plus honest summaries of the remaining tiles.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use gtk::glib;
 use gtk::prelude::*;
@@ -22,6 +23,7 @@ pub struct HomeView {
     play: gtk::Button,
     cover_stack: gtk::Stack,
     picture: gtk::Picture,
+    textures: RefCell<VecDeque<(u64, gtk::gdk::MemoryTexture)>>,
     status: gtk::Label,
     sleep_status: gtk::Label,
     tiles: gtk::Box,
@@ -162,6 +164,7 @@ impl HomeView {
             play,
             cover_stack,
             picture,
+            textures: RefCell::new(VecDeque::new()),
             status,
             sleep_status,
             tiles,
@@ -198,7 +201,7 @@ impl HomeView {
                     self.set_scale(&self.volume, volume as f64);
                 }
                 match &now.cover {
-                    Some(bytes) => self.show_cover(bytes),
+                    Some(cover) => self.show_cover(cover),
                     None => self.cover_stack.set_visible_child_name("placeholder"),
                 }
                 self.status.remove_css_class("danger");
@@ -271,14 +274,31 @@ impl HomeView {
         })
     }
 
-    fn show_cover(&self, bytes: &[u8]) {
-        let bytes = glib::Bytes::from(bytes);
-        match gtk::gdk::Texture::from_bytes(&bytes) {
-            Ok(texture) => {
-                self.picture.set_paintable(Some(&texture));
-                self.cover_stack.set_visible_child_name("cover");
+    fn show_cover(&self, cover: &tidemark_artwork::Cover) {
+        let mut textures = self.textures.borrow_mut();
+        let texture = if let Some(index) = textures.iter().position(|(id, _)| *id == cover.id) {
+            let (_, texture) = textures.remove(index).expect("existing cache index");
+            texture
+        } else {
+            let size = tidemark_artwork::COVER_PX as usize;
+            if cover.pixels.len() != size * size * 4 {
+                self.cover_stack.set_visible_child_name("placeholder");
+                return;
             }
-            Err(_) => self.cover_stack.set_visible_child_name("placeholder"),
+            let bytes = glib::Bytes::from_owned(cover.pixels.clone());
+            gtk::gdk::MemoryTexture::new(
+                size as i32,
+                size as i32,
+                gtk::gdk::MemoryFormat::R8g8b8a8,
+                &bytes,
+                size * 4,
+            )
+        };
+        self.picture.set_paintable(Some(&texture));
+        self.cover_stack.set_visible_child_name("cover");
+        textures.push_back((cover.id, texture));
+        while textures.len() > 8 {
+            textures.pop_front();
         }
     }
 

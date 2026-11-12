@@ -239,7 +239,7 @@ fn render_rows(shared: &Shared, widget: &gtk::Box) {
         row.append(&texts);
         let remove = icon_button("user-trash-symbolic", "Удалить напоминание");
         let shared = shared.clone();
-        let widget = widget.clone();
+        let rows = widget.clone();
         remove.connect_clicked(move |_| {
             let mut store = shared.notes.borrow_mut();
             if index < store.reminders.len() {
@@ -247,7 +247,7 @@ fn render_rows(shared: &Shared, widget: &gtk::Box) {
                 store.save();
             }
             drop(store);
-            render_rows(&shared, &widget);
+            render_rows(&shared, &rows);
         });
         row.append(&remove);
         widget.append(&row);

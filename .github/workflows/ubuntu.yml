@@ -53,6 +53,20 @@ jobs:
       - name: Test MPRIS adapter on an isolated session bus
         run: dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked
 
+  artwork:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-artwork -> target
+      - name: Test bounded artwork fetching and decoding
+        run: cargo test --manifest-path crates/tidemark-artwork/Cargo.toml --locked
+
   gnome-contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
