@@ -20,7 +20,7 @@ version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/linux/Cargo.
 }
 # Debian sorts '~' before a final release; a SemVer '-' would instead become
 # a revision and make the beta newer than the corresponding stable package.
-deb_version=${version/-/~}
+deb_version=${version/-/"~"}
 if [[ "$version" == *-* ]]; then
     dpkg --compare-versions "$deb_version" lt "${version%%-*}" || {
         echo 'Prerelease package must sort before its stable version.' >&2
