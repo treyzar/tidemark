@@ -106,7 +106,7 @@ impl Island {
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
         stack.set_transition_duration(120);
         stack.set_vexpand(true);
-        for (id, label, _) in model::TABS {
+        for (id, label, icon) in model::TABS {
             let page: gtk::Widget = match id {
                 "home" => home.root.clone().upcast(),
                 "clipboard" => clipboard.root.clone().upcast(),
@@ -115,7 +115,11 @@ impl Island {
                 _ => control.root.clone().upcast(),
             };
             let scrolled = crate::ui::scroll(&page);
-            stack.add_titled(&scrolled, Some(id), label);
+            // Icons retain the page title as the tooltip/accessibility label
+            // while keeping the five-tab header inside the configured width.
+            stack
+                .add_titled(&scrolled, Some(id), label)
+                .set_icon_name(icon);
         }
         stack.set_visible_child_name("home");
         switcher.set_stack(Some(&stack));

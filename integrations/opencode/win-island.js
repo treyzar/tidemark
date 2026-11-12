@@ -1,15 +1,28 @@
 // Win Island for opencode: permission questions as a card with buttons on
 // the island, and a notice when a session goes idle.
 // Install: copy to ~/.config/opencode/plugins/win-island.js
-// Needs island-hook.exe (cargo build --release); set WIN_ISLAND_HOOK if it
-// lives somewhere else.
+// Windows: island-hook.exe (cargo build --release). Linux: installed
+// /usr/bin/island-hook, then a local developer build. WIN_ISLAND_HOOK overrides
+// either default when the executable lives somewhere else.
 import { spawn } from "node:child_process"
+import { accessSync, constants } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
 
-const HOOK =
-  process.env.WIN_ISLAND_HOOK ??
-  join(homedir(), "Documents", "win-island", "target", "release", "island-hook.exe")
+function defaultHook() {
+  const checkout = join(homedir(), "Documents", "win-island")
+  if (process.platform !== "linux") return join(checkout, "target", "release", "island-hook.exe")
+  const candidates = [
+    "/usr/bin/island-hook",
+    join(checkout, "crates", "tidemark-agent", "target", "release", "island-hook"),
+    join(checkout, "target", "release", "island-hook"),
+  ]
+  return candidates.find((path) => {
+    try { accessSync(path, constants.X_OK); return true } catch { return false }
+  }) ?? "island-hook"
+}
+
+const HOOK = process.env.WIN_ISLAND_HOOK ?? defaultHook()
 
 // Characters a card may show next to ✓ (same rule as island-hook, which
 // checks it again): printable ASCII, the Russian alphabet, « » ° § € №,
@@ -59,7 +72,7 @@ export const WinIsland = async ({ directory }) => {
         text,
         options: complete ? ["Терминал", "Нет", "✓"] : ["Терминал", "Нет"],
       })
-      if (choice === 2) output.status = "allow"
+      if (complete && choice === 2) output.status = "allow"
       else if (choice === 1) output.status = "deny"
     },
     event: async ({ event }) => {
