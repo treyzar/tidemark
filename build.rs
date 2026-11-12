@@ -1,10 +1,14 @@
+fn resource_directory(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
         return;
     }
-    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let dir = resource_directory(&std::env::var("CARGO_MANIFEST_DIR").unwrap());
     println!("cargo:rerun-if-changed=win-island.manifest");
     println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
     println!("cargo:rustc-link-arg-bins=/MANIFESTINPUT:{dir}/win-island.manifest");
@@ -50,4 +54,20 @@ fn main() {
         .unwrap();
     assert!(status.success(), "Tidemark resources failed to compile");
     println!("cargo:rustc-link-arg-bin=win-island={}", res.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn github_runner_paths_do_not_contain_resource_escape_sequences() {
+        assert_eq!(
+            resource_directory(r"D:\a\tidemark\tidemark"),
+            "D:/a/tidemark/tidemark"
+        );
+        assert_eq!(
+            resource_directory(r"C:\work with spaces\app"),
+            "C:/work with spaces/app"
+        );
+    }
 }
