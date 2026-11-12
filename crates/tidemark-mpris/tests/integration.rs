@@ -10,10 +10,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tidemark_mpris::{Client, Error, MprisPlayerId};
-use zvariant::{ObjectPath, Value};
+use zvariant::{ObjectPath, Signature, Value};
 
-const NAME: &str = "org.mpris.MediaPlayer2.fake";
+const NAME_BASE: &str = "org.mpris.MediaPlayer2.";
 const TRACK: &str = "/org/mpris/MediaPlayer2/Track/1";
+
+/// Each test gets its own well-known name so parallel tests sharing the
+/// private `dbus-run-session` bus cannot see or command each other's fakes.
+const SUFFIX_DISCOVERY: &str = "fake.discovery";
+const SUFFIX_COMMANDS: &str = "fake.commands";
+const SUFFIX_VOLUME: &str = "fake.volume";
+const SUFFIX_RESTART: &str = "fake.restart";
+const SUFFIX_GHOST: &str = "fake.ghost";
 
 #[derive(Debug, Clone)]
 struct State {
@@ -41,10 +49,11 @@ fn metadata(state: &State) -> HashMap<String, Value<'static>> {
         Value::ObjectPath(ObjectPath::try_from(state.track.clone()).unwrap().into()),
     );
     m.insert("xesam:title".into(), Value::from("Fake Song"));
-    m.insert(
-        "xesam:artist".into(),
-        Value::from(vec![Value::from("Fake Artist")]),
-    );
+    // Canonical MPRIS type for xesam:artist is 'as' (array of strings), not
+    // an array of variants — serialize a typed string array.
+    let mut artists = zvariant::Array::new(&Signature::Str);
+    artists.append(Value::from("Fake Artist")).expect("'as' item");
+    m.insert("xesam:artist".into(), Value::Array(artists));
     m.insert("xesam:album".into(), Value::from("Fake Album"));
     m.insert("mpris:artUrl".into(), Value::from("https://art.test/cover.png"));
     m.insert("mpris:length".into(), Value::from(200_000_000i64));
@@ -136,6 +145,7 @@ impl FakePlayer {
 
 
 struct FakeInstance {
+    name: String,
     state: Arc<Mutex<State>>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -144,28 +154,30 @@ struct FakeInstance {
 impl FakeInstance {
     /// Serves one fake MPRIS instance on the session bus; the name is held
     /// until `stop()` is called, so a second instance can re-acquire it.
-    fn serve(state: Arc<Mutex<State>>) -> Self {
+    fn serve(suffix: &'static str, state: Arc<Mutex<State>>) -> Self {
+        let name = format!("{NAME_BASE}{suffix}");
         let stop = Arc::new(AtomicBool::new(false));
-        let thread_state = (state.clone(), stop.clone());
+        let thread_state = (state.clone(), stop.clone(), name.clone());
         let handle = std::thread::Builder::new()
             .name("fake-mpris".into())
             .spawn(move || {
                 async_io::block_on(async move {
-                    let (state, stop) = thread_state;
+                    let (state, stop, name) = thread_state;
                     let conn = zbus::Connection::session().await.expect("session bus");
                     conn.object_server()
                         .at("/org/mpris/MediaPlayer2", FakePlayer { state })
                         .await
                         .expect("serve player");
-                    conn.request_name(NAME).await.expect("request name");
+                    conn.request_name(name.clone()).await.expect("request name");
                     while !stop.load(Ordering::SeqCst) {
                         async_io::Timer::after(Duration::from_millis(20)).await;
                     }
-                    let _ = conn.release_name(NAME).await;
+                    let _ = conn.release_name(name).await;
                 })
             })
             .expect("spawn fake player thread");
         Self {
+            name,
             state,
             stop,
             handle: Some(handle),
@@ -180,35 +192,35 @@ impl FakeInstance {
     }
 }
 
-fn wait_for_player(client: &Client) -> MprisPlayerId {
+fn wait_for_player(client: &Client, name: &str) -> MprisPlayerId {
     for _ in 0..100 {
         if let Ok(players) = client.list_players() {
-            if let Some(id) = players.into_iter().find(|p| p.bus_name == NAME) {
+            if let Some(id) = players.into_iter().find(|p| p.bus_name == name) {
                 return id;
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("fake player {NAME} never appeared");
+    panic!("fake player {name} never appeared");
 }
 
-fn wait_player_gone(client: &Client) {
+fn wait_player_gone(client: &Client, name: &str) {
     for _ in 0..100 {
         if let Ok(players) = client.list_players() {
-            if !players.iter().any(|p| p.bus_name == NAME) {
+            if !players.iter().any(|p| p.bus_name == name) {
                 return;
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("fake player {NAME} never went away");
+    panic!("fake player {name} never went away");
 }
 
 #[test]
 fn discovery_pins_owner_and_snapshot_roundtrips() {
-    let fake = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
+    let fake = FakeInstance::serve(SUFFIX_DISCOVERY, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
-    let id = wait_for_player(&client);
+    let id = wait_for_player(&client, &fake.name);
 
     assert!(id.owner.starts_with(':'), "owner must be unique: {id}");
     let snap = client.snapshot(&id).expect("snapshot");
@@ -228,9 +240,9 @@ fn discovery_pins_owner_and_snapshot_roundtrips() {
 
 #[test]
 fn commands_act_and_track_guard_blocks_stale_seek() {
-    let fake = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
+    let fake = FakeInstance::serve(SUFFIX_COMMANDS, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
-    let id = wait_for_player(&client);
+    let id = wait_for_player(&client, &fake.name);
 
     client.play_pause(&id).expect("play_pause");
     assert!(!fake.state.lock().unwrap().playing, "play_pause must toggle");
@@ -253,9 +265,9 @@ fn commands_act_and_track_guard_blocks_stale_seek() {
 
 #[test]
 fn volume_validation_and_roundtrip() {
-    let fake = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
+    let fake = FakeInstance::serve(SUFFIX_VOLUME, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
-    let id = wait_for_player(&client);
+    let id = wait_for_player(&client, &fake.name);
 
     assert!(matches!(
         client.player_volume(&id, 1.5),
@@ -277,15 +289,16 @@ fn volume_validation_and_roundtrip() {
 /// reported, never commanded; the fresh identity works.
 #[test]
 fn restarted_player_cannot_be_commanded_with_stale_identity() {
-    let first = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
+    let first = FakeInstance::serve(SUFFIX_RESTART, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
-    let stale = wait_for_player(&client);
+    let stale = wait_for_player(&client, &first.name);
 
+    let name = first.name.clone();
     first.stop();
-    wait_player_gone(&client);
+    wait_player_gone(&client, &name);
 
-    let second = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
-    let fresh = wait_for_player(&client);
+    let second = FakeInstance::serve(SUFFIX_RESTART, Arc::new(Mutex::new(State::new())));
+    let fresh = wait_for_player(&client, &name);
     assert_eq!(fresh.bus_name, stale.bus_name);
     assert_ne!(fresh.owner, stale.owner, "restart must get a new unique owner");
 
@@ -301,10 +314,10 @@ fn restarted_player_cannot_be_commanded_with_stale_identity() {
 
 #[test]
 fn unknown_player_reports_player_gone() {
-    let _fake = FakeInstance::serve(Arc::new(Mutex::new(State::new())));
+    let fake = FakeInstance::serve(SUFFIX_GHOST, Arc::new(Mutex::new(State::new())));
     let client = Client::connect().expect("connect");
-    let _ = wait_for_player(&client);
-    let ghost = MprisPlayerId::new("org.mpris.MediaPlayer2.ghost", ":1.1234");
+    let _ = wait_for_player(&client, &fake.name);
+    let ghost = MprisPlayerId::new(&format!("{NAME_BASE}absent"), ":1.1234");
     let err = client.play_pause(&ghost).expect_err("ghost must fail");
     assert!(matches!(err, Error::PlayerGone { .. }), "{err}");
 }

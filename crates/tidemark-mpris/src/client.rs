@@ -71,10 +71,12 @@ impl Client {
         let player = self.player_proxy(id)?;
 
         let metadata = metadata_map(&player)?;
-        let playing = player
-            .get_property::<String>("PlaybackStatus")
-            .map(|s| s == "Playing")
-            .unwrap_or(false);
+        // PlaybackStatus is a mandatory Player property; a missing one is a
+        // protocol error, not a silent "paused".
+        let status: String = player
+            .get_property("PlaybackStatus")
+            .map_err(|e| Error::Dbus(e.to_string()))?;
+        let playing = status == "Playing";
         let position = player
             .get_property::<i64>("Position")
             .ok()
