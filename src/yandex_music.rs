@@ -1,4 +1,4 @@
-//! Yandex Music likes through the player's Windows accessibility interface.
+//! Yandex Music actions through the player's Windows accessibility interface.
 //! No credentials or simulated mouse/keyboard input are involved.
 
 use std::sync::{
@@ -16,13 +16,37 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, IsIconic, IsWindow, PostMessageW, SetForegroundWindow, ShowWindowAsync,
+    SW_RESTORE, SW_SHOWMINNOACTIVE, WM_APP,
+};
 
 pub const WM_YANDEX_LIKE: u32 = WM_APP + 22;
+pub const WM_YANDEX_OPEN: u32 = WM_APP + 23;
 pub struct Outcome {
     pub title: String,
     pub artist: String,
     pub result: Result<bool, String>,
+}
+pub struct OpenOutcome {
+    pub title: String,
+    pub artist: String,
+    pub result: Result<(), String>,
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Like(bool),
+    Open,
+}
+impl Action {
+    fn opens(self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+enum ActionResult {
+    Liked(bool),
+    Opened,
 }
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -73,6 +97,47 @@ pub fn spawn(
                 let _ = PostMessageW(
                     Some(HWND(raw as *mut _)),
                     WM_YANDEX_LIKE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+    if started.is_err() {
+        BUSY.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
+/// Opens the existing player for this exact track. No tabs are created and no
+/// playback or favorite state is changed. Shares the like worker's busy gate.
+pub fn spawn_open(
+    hwnd: HWND,
+    title: String,
+    artist: String,
+    slot: Arc<Mutex<Option<OpenOutcome>>>,
+) -> bool {
+    if BUSY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let raw = hwnd.0 as isize;
+    let started = std::thread::Builder::new()
+        .name("yandex-open".into())
+        .spawn(move || {
+            let _busy = Busy;
+            let result = unsafe { run_action(&title, &artist, Action::Open) }.map(|_| ());
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenOutcome {
+                title,
+                artist,
+                result,
+            });
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(raw as *mut _)),
+                    WM_YANDEX_OPEN,
                     WPARAM(0),
                     LPARAM(0),
                 );
@@ -318,12 +383,13 @@ unsafe fn executable(element: &IUIAutomationElement) -> Option<String> {
 struct RestoreTab {
     original: IUIAutomationSelectionItemPattern,
     target: IUIAutomationSelectionItemPattern,
+    armed: bool,
 }
 impl Drop for RestoreTab {
     fn drop(&mut self) {
         unsafe {
             // If the user changed tabs meanwhile, leave their selection alone.
-            if self.target.CurrentIsSelected().is_ok_and(|v| v.as_bool()) {
+            if self.armed && self.target.CurrentIsSelected().is_ok_and(|v| v.as_bool()) {
                 let _ = self.original.Select();
             }
         }
@@ -360,6 +426,7 @@ unsafe fn select_tab(
     let restore = RestoreTab {
         original,
         target: target_pattern,
+        armed: true,
     };
     restore
         .target
@@ -492,7 +559,106 @@ unsafe fn apply(
     }
 }
 
+struct RestoreMinimized {
+    hwnd: HWND,
+    armed: bool,
+}
+impl Drop for RestoreMinimized {
+    fn drop(&mut self) {
+        if self.armed {
+            unsafe {
+                let _ = ShowWindowAsync(self.hwnd, SW_SHOWMINNOACTIVE);
+            }
+        }
+    }
+}
+
+struct Candidate {
+    window: IUIAutomationElement,
+    tab: Option<IUIAutomationElement>,
+    web: bool,
+    // Drop selection before re-minimizing a restored browser window.
+    tab_restore: Option<RestoreTab>,
+    minimized_restore: Option<RestoreMinimized>,
+}
+impl Candidate {
+    fn keep_open(&mut self) {
+        if let Some(restore) = self.tab_restore.as_mut() {
+            restore.armed = false;
+        }
+        if let Some(restore) = self.minimized_restore.as_mut() {
+            restore.armed = false;
+        }
+    }
+}
+
+unsafe fn native_handle(window: &IUIAutomationElement) -> Result<HWND, String> {
+    let hwnd = window
+        .CurrentNativeWindowHandle()
+        .map_err(|e| fail("Не удалось определить окно Яндекс Музыки", e))?;
+    if hwnd.is_invalid() || !IsWindow(Some(hwnd)).as_bool() {
+        return Err("Окно Яндекс Музыки уже закрыто".into());
+    }
+    Ok(hwnd)
+}
+
+unsafe fn prepare_open(
+    window: &IUIAutomationElement,
+    action: Action,
+) -> Result<Option<RestoreMinimized>, String> {
+    if !action.opens() {
+        return Ok(None);
+    }
+    let hwnd = native_handle(window)?;
+    if !IsIconic(hwnd).as_bool() {
+        return Ok(None);
+    }
+    let restore = RestoreMinimized { hwnd, armed: true };
+    if !ShowWindowAsync(hwnd, SW_RESTORE).as_bool() {
+        return Err("Не удалось восстановить окно Яндекс Музыки".into());
+    }
+    let deadline = Instant::now() + Duration::from_millis(900);
+    while IsIconic(hwnd).as_bool() {
+        if Instant::now() >= deadline {
+            return Err("Окно Яндекс Музыки не восстановилось".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(Some(restore))
+}
+
+unsafe fn open_player(
+    uia: &IUIAutomation,
+    candidate: &Candidate,
+    title: &str,
+    artist: &str,
+) -> Result<(), String> {
+    selected(candidate.tab.as_ref())?;
+    confirmed_player(uia, &candidate.window, candidate.web, title, artist)?;
+    let hwnd = native_handle(&candidate.window)?;
+    if !SetForegroundWindow(hwnd).as_bool() {
+        return Err("Windows не разрешила открыть окно Яндекс Музыки".into());
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while GetForegroundWindow() != hwnd {
+        if Instant::now() >= deadline {
+            return Err("Windows не подтвердила открытие Яндекс Музыки".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    selected(candidate.tab.as_ref())?;
+    confirmed_player(uia, &candidate.window, candidate.web, title, artist)?;
+    Ok(())
+}
+
 unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, String> {
+    match run_action(title, artist, Action::Like(want))? {
+        ActionResult::Liked(value) => Ok(value),
+        ActionResult::Opened => Err("Неожиданный результат действия Яндекс Музыки".into()),
+    }
+}
+
+unsafe fn run_action(title: &str, artist: &str, action: Action) -> Result<ActionResult, String> {
     if normalized(title).is_empty() || artist_name(artist).is_empty() {
         return Err("Неизвестны название или исполнитель трека".into());
     }
@@ -510,6 +676,34 @@ unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, Str
         .map_err(|e| fail("Не удалось ограничить время подключения", e))?;
     uia.SetTransactionTimeout(1000)
         .map_err(|e| fail("Не удалось ограничить время операции", e))?;
+    let mut candidate = find_player(&uia, title, artist, action)?;
+    match action {
+        Action::Like(want) => apply(
+            &uia,
+            &candidate.window,
+            candidate.tab.as_ref(),
+            candidate.web,
+            title,
+            artist,
+            want,
+        )
+        .map(ActionResult::Liked),
+        Action::Open => {
+            open_player(&uia, &candidate, title, artist)?;
+            // Keep all COM references normally owned/dropped. Only disarm the
+            // restoration policy once the exact requested player is foreground.
+            candidate.keep_open();
+            Ok(ActionResult::Opened)
+        }
+    }
+}
+
+unsafe fn find_player(
+    uia: &IUIAutomation,
+    title: &str,
+    artist: &str,
+    action: Action,
+) -> Result<Candidate, String> {
     let root = uia
         .GetRootElement()
         .map_err(|e| fail("Недоступен рабочий стол Windows", e))?;
@@ -550,7 +744,14 @@ unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, Str
             // Do not attempt another target once the player has been verified:
             // a timeout after Toggle must never cause a second mutation.
             if player(&uia, &window, title, artist).is_ok() {
-                return apply(&uia, &window, None, false, title, artist, want);
+                let minimized_restore = prepare_open(&window, action)?;
+                return Ok(Candidate {
+                    window,
+                    tab: None,
+                    web: false,
+                    tab_restore: None,
+                    minimized_restore,
+                });
             }
             continue;
         }
@@ -569,8 +770,15 @@ unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, Str
                 .is_ok_and(|n| service_name(&n.to_string()))
         {
             attempted += 1;
+            let minimized_restore = prepare_open(&window, action)?;
             if confirmed_player(&uia, &window, true, title, artist).is_ok() {
-                return apply(&uia, &window, None, true, title, artist, want);
+                return Ok(Candidate {
+                    window,
+                    tab: None,
+                    web: true,
+                    tab_restore: None,
+                    minimized_restore,
+                });
             }
         }
         for tab in &tabs {
@@ -584,7 +792,14 @@ unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, Str
                 continue;
             }
             attempted += 1;
-            let _restore = match select_tab(&tabs, tab) {
+            let minimized_restore = match prepare_open(&window, action) {
+                Ok(restore) => restore,
+                Err(e) => {
+                    last_error = e;
+                    continue;
+                }
+            };
+            let tab_restore = match select_tab(&tabs, tab) {
                 Ok(r) => r,
                 Err(e) => {
                     last_error = e;
@@ -598,7 +813,15 @@ unsafe fn change_like(title: &str, artist: &str, want: bool) -> Result<bool, Str
                     return Err(e);
                 }
                 match confirmed_player(&uia, &window, true, title, artist) {
-                    Ok(_) => return apply(&uia, &window, Some(tab), true, title, artist, want),
+                    Ok(_) => {
+                        return Ok(Candidate {
+                            window: window.clone(),
+                            tab: Some(tab.clone()),
+                            web: true,
+                            tab_restore,
+                            minimized_restore,
+                        })
+                    }
                     Err(e) => last_error = e,
                 }
                 if Instant::now() >= ready {

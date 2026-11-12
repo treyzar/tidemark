@@ -242,6 +242,8 @@ pub enum Hit {
     MediaLike,
     MediaSeek,
     MediaCopy,
+    MediaOpen,
+    MediaMute,
     /// Row `n` of the clipboard history tile.
     Clip(usize),
     /// App `n` of the dock.

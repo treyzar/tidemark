@@ -18,6 +18,9 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
+#[path="media_artwork.rs"]
+mod artwork;
+
 pub const WM_MEDIA: u32 = WM_APP + 3;
 /// Cover art is decoded once, cropped square and scaled to this size.
 pub const COVER_PX: u32 = 160;
@@ -70,6 +73,8 @@ pub enum Command {
     Prev,
     SetVolume(f32),
     Refresh,
+    MetadataChanged,
+    SetSleepTimer{after:Option<Duration>,app_id:String,title:String,artist:String,request:u64},
     SeekTo{position:Duration,title:String,artist:String},
 }
 
@@ -78,9 +83,12 @@ pub fn seek_position(duration:Duration,ratio:f32)->Duration {
     Duration::from_secs_f64(duration.as_secs_f64()*ratio as f64)
 }
 
+pub struct SleepNotice {pub request:u64,pub text:String}
+
 pub struct Service {
     state: Arc<Mutex<Option<MediaState>>>,
     tx: Sender<Command>,
+    notice:Arc<Mutex<Option<SleepNotice>>>,
 }
 
 impl Service {
@@ -89,6 +97,7 @@ impl Service {
         let (tx, rx) = mpsc::channel();
         let shared = state.clone();
         let events_tx = tx.clone();
+        let notice=Arc::new(Mutex::new(None));let worker_notice=notice.clone();
         let hwnd_raw = hwnd.0 as isize;
         std::thread::Builder::new()
             .name("media".into())
@@ -99,18 +108,23 @@ impl Service {
                     return;
                 }
                 let mut worker = Worker::new(hwnd, shared, events_tx);
+                worker.notice=worker_notice;
                 worker.refresh();
                 loop {
-                    let wait = if worker.watch_legacy() { LEGACY_POLL } else { Duration::from_secs(3600) };
+                    worker.check_sleep();
+                    let mut wait = if worker.watch_legacy() { LEGACY_POLL } else { Duration::from_secs(3600) };
+                    let now=Instant::now();
+                    if let Some(art)=worker.artwork.wait(now) {wait=wait.min(art);}
+                    if let Some((deadline,_,_))=&worker.sleep {wait=wait.min(deadline.saturating_duration_since(now));}
                     match rx.recv_timeout(wait) {
                         Ok(cmd) => worker.handle(cmd),
-                        Err(RecvTimeoutError::Timeout) => worker.refresh(),
+                        Err(RecvTimeoutError::Timeout) => {worker.check_sleep();worker.refresh();},
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
                 }
             })
             .ok()?;
-        Some(Self { state, tx })
+        Some(Self { state, tx,notice })
     }
 
     pub fn send(&self, cmd: Command) {
@@ -120,6 +134,7 @@ impl Service {
     pub fn get(&self) -> Option<MediaState> {
         self.state.lock().unwrap().clone()
     }
+    pub fn take_notice(&self)->Option<SleepNotice> {self.notice.lock().unwrap_or_else(|e|e.into_inner()).take()}
 }
 
 struct Worker {
@@ -128,9 +143,12 @@ struct Worker {
     tx: Sender<Command>,
     manager: Option<GlobalSystemMediaTransportControlsSessionManager>,
     session: Option<(GlobalSystemMediaTransportControlsSession, [i64; 3])>,
-    /// (track key, cover) so art is decoded once per track.
+    /// Cached art with event invalidation and bounded late-thumbnail retries.
     cover_cache: Option<(u64, Option<Cover>)>,
     last: Option<MediaState>,
+    artwork:artwork::ArtworkSchedule,
+    sleep:Option<(Instant,GlobalSystemMediaTransportControlsSession,u64)>,
+    notice:Arc<Mutex<Option<SleepNotice>>>,
 }
 
 fn track_key(app: &str, title: &str, artist: &str) -> u64 {
@@ -155,11 +173,11 @@ impl Worker {
         if let Some(m) = &manager {
             let t = tx.clone();
             let _ = m.CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
-                let _ = t.send(Command::Refresh);
+                let _ = t.send(Command::MetadataChanged);
                 Ok(())
             }));
         }
-        Self { hwnd, shared, tx, manager, session: None, cover_cache: None, last: None }
+        Self { hwnd, shared, tx, manager, session: None, cover_cache: None, last: None,artwork:Default::default(),sleep:None,notice:Arc::new(Mutex::new(None)) }
     }
 
     /// Legacy players have no events, so poll while no SMTC session plays.
@@ -171,6 +189,15 @@ impl Worker {
         let player = self.last.as_ref().map(|s| s.player);
         match (cmd, player) {
             (Command::Refresh, _) => {}
+            (Command::MetadataChanged,_)=>self.artwork.invalidate(),
+            (Command::SetSleepTimer{after,app_id,title,artist,request},_)=>{
+                self.sleep=None;
+                if let Some(after)=after {
+                    let session=self.session.as_ref().map(|(s,_)|s.clone()).filter(|_|self.last.as_ref().is_some_and(|s|s.player==Player::Smtc&&s.app_id==app_id));
+                    let session=session.filter(|s|s.TryGetMediaPropertiesAsync().and_then(|p|p.get()).is_ok_and(|p|p.Title().is_ok_and(|t|t.to_string()==title)&&p.Artist().is_ok_and(|a|a.to_string()==artist)));
+                    if let Some(session)=session {self.sleep=Some((Instant::now()+after,session,request));}else{self.sleep_notice(request,"Не удалось запустить таймер для этого плеера");}
+                }
+            },
             (Command::SeekTo{position,title,artist},Some(Player::Smtc))=>{
                 if let Some((session,_))=&self.session {
                     if let Ok(props)=session.TryGetMediaPropertiesAsync().and_then(|p|p.get()) {
@@ -203,6 +230,20 @@ impl Worker {
         self.refresh();
     }
 
+    fn sleep_notice(&self,request:u64,text:&str) {
+        *self.notice.lock().unwrap_or_else(|e|e.into_inner())=Some(SleepNotice{request,text:text.to_string()});
+        unsafe {let _=PostMessageW(Some(self.hwnd),WM_MEDIA,WPARAM(0),LPARAM(0));}
+    }
+    fn check_sleep(&mut self) {
+        if self.sleep.as_ref().is_some_and(|(deadline,_,_)|*deadline<=Instant::now()) {
+            let (_,session,request)=self.sleep.take().unwrap();
+            // Pause the captured session, never whichever tab/player became current later.
+            let paused=session.TryPauseAsync().and_then(|p|p.get()).unwrap_or(false);
+            self.sleep_notice(request,if paused {"Музыка поставлена на паузу по таймеру"}else{"Плеер не подтвердил остановку по таймеру"});
+            self.refresh();
+        }
+    }
+
     fn watch_session(&mut self, session: Option<GlobalSystemMediaTransportControlsSession>) {
         let same = match (&self.session, &session) {
             (Some((a, _)), Some(b)) => a.as_raw() == b.as_raw() || a == b,
@@ -212,6 +253,7 @@ impl Worker {
         if same {
             return;
         }
+        self.cover_cache=None;self.artwork.reset();
         if let Some((old, [a, b, c])) = self.session.take() {
             let _ = old.RemoveMediaPropertiesChanged(a);
             let _ = old.RemovePlaybackInfoChanged(b);
@@ -224,9 +266,10 @@ impl Worker {
                     let _ = t.send(Command::Refresh);
                 }
             };
-            let (f1, f2, f3) = (ev(&self.tx), ev(&self.tx), ev(&self.tx));
+            let (f2, f3) = (ev(&self.tx), ev(&self.tx));
+            let art_tx=self.tx.clone();
             let a = s.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
-                f1();
+                let _=art_tx.send(Command::MetadataChanged);
                 Ok(())
             }));
             let b = s.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
@@ -274,10 +317,11 @@ impl Worker {
 
         let key = track_key(&app_id, &title, &artist);
         let cover = match &self.cover_cache {
-            Some((k, c)) if *k == key => c.clone(),
+            Some((k, c)) if *k == key && !self.artwork.needs_read(key,Instant::now()) => c.clone(),
             _ => {
                 let c = props.Thumbnail().ok().and_then(|t| read_cover(&t));
                 self.cover_cache = Some((key, c.clone()));
+                self.artwork.read(key,Instant::now());
                 c
             }
         };
@@ -302,6 +346,7 @@ impl Worker {
     fn refresh(&mut self) {
         let started = Instant::now();
         let smtc = self.read_smtc();
+        self.artwork.finish_attempt(Instant::now());
         // A playing SMTC session wins; otherwise a running legacy player.
         let state = match smtc {
             Some(s) if s.playing => Some(s),
@@ -408,6 +453,15 @@ mod tests {
     fn seek_capability_only_changes_are_visible_updates() {
         let a=state(false,0);let mut b=a.clone();b.can_seek=!a.can_seek;
         assert!(!same_view(&a,&b));
+    }
+
+    #[test]
+    fn cover_only_change_refreshes_the_card() {
+        let a=state(true,0);let mut b=a.clone();
+        b.cover=Some(Cover{id:1,pixels:Arc::new(vec![])});
+        assert!(!same_view(&a,&b));
+        let mut c=b.clone();c.cover.as_mut().unwrap().id=2;
+        assert!(!same_view(&b,&c));assert!(same_view(&c,&c));
     }
 
     #[test]

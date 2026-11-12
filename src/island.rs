@@ -37,6 +37,7 @@ use crate::theme::Theme;
 use crate::tray::{self, TrayAction};
 use crate::weather::{self, WM_WEATHER};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -104,6 +105,8 @@ const HOME_OFFSET: f32 = layout::TAB_BAR_H - layout::PAD;
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
 const MENU_REMOVE: usize = 1;
 const MENU_CLEAR: usize = 2;
+const MENU_PIN:usize=3;
+const MENU_REVEAL:usize=4;
 /// While a full-screen app hides the island: watch for the cursor at the
 /// top edge. 10 checks a second, only in that state.
 const TIMER_EDGE: usize = 7;
@@ -155,6 +158,11 @@ pub struct Island {
     like_busy: bool,
     like_slot: Arc<Mutex<Option<crate::yandex_music::Outcome>>>,
     media_message: String,
+    player_open_busy:bool,
+    player_open_slot:Arc<Mutex<Option<crate::yandex_music::OpenOutcome>>>,
+    unmuted_volumes:HashMap<String,f32>,
+    sleep_deadline:Option<Instant>,
+    sleep_request:u64,
     dragging_volume: bool,
     last_volume_sent: Option<Instant>,
     lyrics_service: Option<lyrics::Service>,
@@ -328,6 +336,9 @@ pub fn poll_completed_actions() {
     with_island(|i| {
         let ready=i.like_busy && i.like_slot.lock().unwrap_or_else(|e|e.into_inner()).is_some();
         if ready {i.like_done();}
+        let open_ready=i.player_open_busy && i.player_open_slot.lock().unwrap_or_else(|e|e.into_inner()).is_some();
+        if open_ready {i.player_open_done();}
+        if i.sleep_deadline.is_some() {i.media_notice();}
     });
 }
 
@@ -387,6 +398,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             media: None,
             media_view: None,
             like_track:None,like_busy:false,like_slot:Arc::new(Mutex::new(None)),media_message:String::new(),
+            player_open_busy:false,player_open_slot:Arc::new(Mutex::new(None)),unmuted_volumes:HashMap::new(),sleep_deadline:None,sleep_request:0,
             dragging_volume: false,
             last_volume_sent: None,
             lyrics_service: None,
@@ -784,6 +796,7 @@ impl Island {
     }
 
     fn media_arrived(&mut self) {
+        self.media_notice();
         let before=self.media.as_ref().map(|m|(m.title.clone(),m.artist.clone()));
         self.media = self.media_service.as_ref().and_then(|s| s.get());
         if before!=self.media.as_ref().map(|m|(m.title.clone(),m.artist.clone())) {self.like_track=None;self.media_message.clear();}
@@ -897,6 +910,41 @@ impl Island {
                 }
             }
         }
+    }
+
+    fn media_notice(&mut self) {
+        let notice=self.media_service.as_ref().and_then(|s|s.take_notice());
+        if let Some(notice)=notice.filter(|n|n.request==self.sleep_request) {
+            self.sleep_deadline=None;self.media_message=notice.text.clone();self.refresh_media_view();
+            self.show_toast(Toast{badge:Badge::Text("♫".into()),title:"Таймер музыки".into(),text:notice.text,level:None,actions:Vec::new()},TOAST_MS);
+        }
+    }
+    fn open_player(&mut self) {
+        if self.player_open_busy {return;}
+        let Some(m)=self.media.as_ref() else{return};
+        self.player_open_busy=crate::yandex_music::spawn_open(self.hwnd,m.title.clone(),m.artist.clone(),self.player_open_slot.clone());
+        self.media_message=if self.player_open_busy {"Открываю Яндекс Музыку…".into()}else{"Дождитесь завершения предыдущего действия".into()};self.refresh_media_view();
+    }
+    fn player_open_done(&mut self) {
+        let Some(result)=self.player_open_slot.lock().unwrap_or_else(|e|e.into_inner()).take() else{return};
+        self.player_open_busy=false;
+        if self.media.as_ref().is_some_and(|m|m.title==result.title&&m.artist==result.artist) {
+            self.media_message=result.result.err().unwrap_or_default();self.refresh_media_view();
+        }
+    }
+    fn mute_player(&mut self) {
+        let Some(m)=self.media.as_ref() else{return};let Some(volume)=m.volume else{return};
+        let new=if volume>0.001 {self.unmuted_volumes.insert(m.app_id.clone(),volume);0.0}else{self.unmuted_volumes.get(&m.app_id).copied().unwrap_or(0.5)};
+        if let Some(service)=&self.media_service {service.send(Command::SetVolume(new));}
+    }
+    fn set_sleep(&mut self,minutes:Option<u32>) {
+        let Some(m)=self.media.as_ref() else{return};
+        if minutes.is_some()&&m.player!=media::Player::Smtc {self.media_message="Таймер доступен для плееров Windows SMTC".into();self.refresh_media_view();return;}
+        self.sleep_request=self.sleep_request.wrapping_add(1);
+        let after=minutes.map(|n|Duration::from_secs(n as u64*60));
+        self.sleep_deadline=after.map(|d|Instant::now()+d);
+        if let Some(service)=&self.media_service {service.send(Command::SetSleepTimer{after,app_id:m.app_id.clone(),title:m.title.clone(),artist:m.artist.clone(),request:self.sleep_request});}
+        self.media_message=minutes.map(|n|format!("Таймер музыки: {n} мин")).unwrap_or_else(||"Таймер остановки отменён".into());self.refresh_media_view();
     }
 
     fn like_song(&mut self) {
@@ -1091,6 +1139,8 @@ impl Island {
             TileKind::Media => {
                 let m = self.media.as_ref()?;
                 let r = layout::media_regions(tile);
+                if r.cover.contains(dx,dy) {return (!self.player_open_busy).then_some(Hit::MediaOpen);}
+                if r.speaker.contains(dx,dy) {return m.volume.map(|_|Hit::MediaMute);}
                 if r.like.contains(dx,dy) {return (!self.like_busy).then_some(Hit::MediaLike);}
                 if r.progress_hit.contains(dx,dy) {return m.can_seek.then_some(Hit::MediaSeek);}
                 if r.title.contains(dx,dy)||r.artist.contains(dx,dy) {return Some(Hit::MediaCopy);}
@@ -1152,6 +1202,8 @@ impl Island {
                     self.refresh_media_view();
                 }
             },
+            Some(Hit::MediaOpen)=>self.open_player(),
+            Some(Hit::MediaMute)=>self.mute_player(),
             Some(Hit::MediaVolume) => {
                 self.dragging_volume = true;
                 self.drag_volume(x, true);
@@ -2450,19 +2502,65 @@ impl Island {
         self.window_message=result.err().unwrap_or_default();self.refresh_window_view();
     }
 
+    fn music_menu(&mut self) {
+        let Some(m)=self.media.as_ref() else{return};
+        let supports_sleep=m.player==media::Player::Smtc;
+        let command=unsafe {
+            let Ok(menu)=CreatePopupMenu() else{return};
+            let _=AppendMenuW(menu,MF_STRING,1,w!("Открыть Яндекс Музыку"));
+            let _=AppendMenuW(menu,MF_STRING,2,w!("Скопировать исполнителя и название"));
+            if supports_sleep {
+                let _=AppendMenuW(menu,MF_SEPARATOR,0,None);
+                for (id,label) in [(15,"Остановить через 15 минут"),(30,"Остановить через 30 минут"),(60,"Остановить через 60 минут")] {let _=AppendMenuW(menu,MF_STRING,id,&windows::core::HSTRING::from(label));}
+            }
+            if let Some(deadline)=self.sleep_deadline {
+                let minutes=deadline.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);
+                let _=AppendMenuW(menu,MF_STRING,3,&windows::core::HSTRING::from(format!("Отменить таймер · осталось {minutes} мин")));
+            }
+            let mut point=POINT::default();let _=GetCursorPos(&mut point);let _=SetForegroundWindow(self.hwnd);
+            let result=TrackPopupMenu(menu,TPM_RIGHTBUTTON|TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,None,self.hwnd,None);
+            let _=DestroyMenu(menu);result.0
+        };
+        self.media_arrived();
+        match command {
+            1=>self.open_player(),
+            2=>{if let Some(m)=&self.media {self.quiet_next_clip=true;let _=clipboard::write(self.hwnd,&Entry::Text{text:format!("{} — {}",m.artist,m.title)});}},
+            3=>self.set_sleep(None),
+            15|30|60=>self.set_sleep(Some(command as u32)),
+            _=>{},
+        }
+    }
+
+    fn reveal_clip(&mut self,index:usize) {
+        let path=self.history.items.get(index).and_then(|item|match &item.entry {
+            Entry::Files{paths}=>paths.first().map(std::path::PathBuf::from),
+            Entry::Image{file,..}=>Some(clip_history::dir().join(file)),
+            _=>None,
+        });
+        if let Some(path)=path.filter(|p|p.exists()) {
+            unsafe {windows::Win32::UI::Shell::ShellExecuteW(None,w!("open"),w!("explorer.exe"),&windows::core::HSTRING::from(format!("/select,\"{}\"",path.display())),None,SW_SHOWNORMAL);}
+        }
+    }
+
     /// Right-click menu for clipboard rows and dock apps.
     fn context_menu(&mut self, x: i32, y: i32) {
         let hit = self.hit_at(x, y);
+        if matches!(hit,Some(Hit::MediaOpen|Hit::MediaMute|Hit::MediaLike|Hit::MediaCopy|Hit::MediaSeek|Hit::MediaPrev|Hit::MediaNext|Hit::MediaPlay|Hit::MediaVolume)) {self.music_menu();return;}
         if matches!(hit,Some(Hit::WinActivate|Hit::WinPin|Hit::WinOpacity|Hit::WinMinimize|Hit::WinMenu)) {self.window_menu();return;}
-        let items: &[(usize, PCWSTR)] = match hit {
-            Some(Hit::Clip(_)) => &[(MENU_REMOVE, w!("Удалить из истории")), (MENU_CLEAR, w!("Очистить историю"))],
-            Some(Hit::Dock(_)) => &[(MENU_REMOVE, w!("Убрать из дока"))],
-            Some(Hit::ShelfRow(_)) => &[(MENU_REMOVE, w!("Убрать с полки")), (MENU_CLEAR, w!("Очистить полку"))],
+        let items: Vec<(usize, PCWSTR)> = match hit {
+            Some(Hit::Clip(i)) => {
+                let pinned=self.history.items.get(i).is_some_and(|item|item.pinned);
+                let mut items=vec![(MENU_PIN,if pinned {w!("Открепить")}else{w!("Закрепить")}),(MENU_REMOVE,w!("Удалить из истории")),(MENU_CLEAR,w!("Очистить незакреплённое"))];
+                if self.history.items.get(i).is_some_and(|item|matches!(item.entry,Entry::Files{..}|Entry::Image{..})) {items.push((MENU_REVEAL,w!("Показать файл в папке")));}
+                items
+            },
+            Some(Hit::Dock(_)) => vec![(MENU_REMOVE, w!("Убрать из дока"))],
+            Some(Hit::ShelfRow(_)) => vec![(MENU_REMOVE, w!("Убрать с полки")), (MENU_CLEAR, w!("Очистить полку"))],
             _ => return,
         };
         let cmd = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
-            for (id, text) in items {
+            for (id, text) in &items {
                 let _ = AppendMenuW(menu, MF_STRING, *id, *text);
             }
             let mut pt = POINT::default();
@@ -2473,6 +2571,8 @@ impl Island {
             cmd.0 as usize
         };
         match (hit, cmd) {
+            (Some(Hit::Clip(i)),MENU_PIN)=>{self.history.toggle_pin(i);self.history.save();self.refresh_clip_rows();},
+            (Some(Hit::Clip(i)),MENU_REVEAL)=>self.reveal_clip(i),
             (Some(Hit::Clip(i)), MENU_REMOVE) => {
                 if i < self.history.items.len() {
                     let item = self.history.items.remove(i);
@@ -2530,7 +2630,7 @@ impl Island {
             .take(8)
             .map(|i| {
                 let (glyph, text) = clip_history::label(&i.entry);
-                ClipRow { glyph, text, ago: clip_history::ago(i.copied_at, now) }
+                ClipRow { glyph, text, ago: if i.pinned {"Закр.".into()}else{clip_history::ago(i.copied_at, now)} }
             })
             .collect();
         let home: Vec<ClipRow> = rows.iter().take(3).cloned().collect();
@@ -3171,6 +3271,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i|i.like_done());
             return LRESULT(0);
         }
+        crate::yandex_music::WM_YANDEX_OPEN=>{with_island(|i|i.player_open_done());return LRESULT(0);}
         WM_TIMER if wparam.0 == TIMER_TRIM => {
             let _ = KillTimer(Some(hwnd), TIMER_TRIM);
             with_island(|i| {

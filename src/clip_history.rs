@@ -1,4 +1,4 @@
-//! Clipboard history model: what was copied, newest first, de-duplicated,
+//! Clipboard history model: pinned first, newest within each group, de-duplicated,
 //! capped, and saved as JSON in %APPDATA%\win-island\clipboard (images sit
 //! next to it as PNG files). No Windows APIs here; see `clipboard.rs`.
 
@@ -24,6 +24,8 @@ pub struct Item {
     pub entry: Entry,
     /// Unix seconds.
     pub copied_at: u64,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +51,13 @@ fn file() -> PathBuf {
 
 impl History {
     pub fn load() -> Self {
-        std::fs::read_to_string(file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        std::fs::read_to_string(file()).map(|text| Self::from_json(&text)).unwrap_or_default()
+    }
+
+    fn from_json(text: &str) -> Self {
+        let mut history: Self = serde_json::from_str(text).unwrap_or_default();
+        history.normalize();
+        history
     }
 
     pub fn save(&self) {
@@ -59,17 +67,25 @@ impl History {
         }
     }
 
-    /// Adds `entry` on top. Copying something already in the history moves
-    /// it up instead of duplicating it. Returns the PNG files that fell off
-    /// the end, so the caller can delete them.
+    /// Adds `entry` as newest in its group. Copying an existing entry preserves
+    /// its pin. Returns discarded PNG names for deletion, including the new
+    /// image if every slot is pinned and it cannot be kept.
     pub fn push(&mut self, entry: Entry, now: u64) -> Vec<String> {
         if let Entry::Text { text } = &entry {
             if text.trim().is_empty() || text.chars().count() > MAX_TEXT_CHARS {
                 return Vec::new();
             }
         }
+        let pinned = self.items.iter().any(|i| i.entry == entry && i.pinned);
         self.items.retain(|i| i.entry != entry);
-        self.items.insert(0, Item { entry, copied_at: now });
+        self.items.insert(0, Item { entry, copied_at: now, pinned });
+        self.normalize()
+    }
+
+    /// Restores ordering and caps malformed/oversized saved histories. Pinned
+    /// entries take priority; if there are over 50 pins, keep the newest 50.
+    fn normalize(&mut self) -> Vec<String> {
+        self.sort_items();
         let dropped: Vec<Item> = self.items.drain(self.items.len().min(MAX_ITEMS)..).collect();
         dropped
             .into_iter()
@@ -80,15 +96,30 @@ impl History {
             .collect()
     }
 
+    fn sort_items(&mut self) {
+        self.items.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.copied_at.cmp(&a.copied_at)));
+    }
+
+    /// Toggles the row's pin and reorders the list without changing copy time.
+    /// Returns true on success, or false for an out-of-range index.
+    pub fn toggle_pin(&mut self, index: usize) -> bool {
+        let Some(item) = self.items.get_mut(index) else { return false };
+        item.pinned = !item.pinned;
+        self.sort_items();
+        true
+    }
+
+    /// Clears unpinned entries, returning only their PNG names for deletion.
     pub fn clear(&mut self) -> Vec<String> {
-        let files = self
-            .items
-            .drain(..)
-            .filter_map(|i| match i.entry {
-                Entry::Image { file, .. } => Some(file),
-                _ => None,
-            })
-            .collect();
+        let mut files = Vec::new();
+        self.items.retain(|i| {
+            if !i.pinned {
+                if let Entry::Image { file, .. } = &i.entry {
+                    files.push(file.clone());
+                }
+            }
+            i.pinned
+        });
         files
     }
 }
@@ -120,6 +151,7 @@ pub fn label(entry: &Entry) -> (Glyph, String) {
         }
         Entry::Image { width, height, .. } => (Glyph::Image, format!("Изображение {width}×{height}")),
         Entry::Files { paths } => match paths.as_slice() {
+            [] => (Glyph::Files, "0 файлов".into()),
             [one] => (Glyph::Files, file_name(one).to_string()),
             many => (Glyph::Files, format!("{} {}: {}", many.len(), files_word(many.len()), file_name(&many[0]))),
         },
@@ -209,9 +241,140 @@ mod tests {
         let mut h = History::default();
         h.push(Entry::Files { paths: vec!["C:\\x".into()] }, 5);
         h.push(text("hi"), 6);
+        assert!(h.toggle_pin(1));
         let json = serde_json::to_string(&h).unwrap();
         assert!(json.contains("\"kind\":\"text\""));
         let back: History = serde_json::from_str(&json).unwrap();
         assert_eq!(back.items, h.items);
+    }
+
+    #[test]
+    fn old_json_defaults_to_unpinned() {
+        let h: History = serde_json::from_str(
+            r#"{"items":[{"entry":{"kind":"text","text":"legacy"},"copied_at":1}]}"#,
+        ).unwrap();
+        let saved = serde_json::to_value(&h).unwrap();
+        assert_eq!(saved["items"][0]["pinned"], false);
+    }
+
+    #[test]
+    fn empty_file_list_has_a_label() {
+        assert_eq!(label(&Entry::Files { paths: vec![] }), (Glyph::Files, "0 файлов".into()));
+    }
+
+    #[test]
+    fn pinned_item_survives_more_than_capacity_pushes() {
+        let mut h = History::default();
+        h.push(text("keep"), 0);
+        h.items[0].pinned = true;
+        for i in 1..=100 {
+            h.push(text(&format!("new {i}")), i);
+        }
+        assert_eq!(h.items.len(), 50);
+        assert_eq!(h.items[0].entry, text("keep"));
+        assert!(h.items[0].pinned);
+        assert_eq!(h.items[1].entry, text("new 100"));
+        assert_eq!(h.items[49].entry, text("new 52"));
+    }
+
+    #[test]
+    fn duplicate_push_preserves_pin_and_updates_group_order() {
+        let mut h = History::default();
+        h.push(text("a"), 1);
+        h.items[0].pinned = true;
+        h.push(text("b"), 2);
+        h.items.iter_mut().find(|i| i.entry == text("b")).unwrap().pinned = true;
+        h.push(text("normal"), 3);
+        h.push(text("a"), 4);
+        assert_eq!(h.items.iter().map(|i| i.entry.clone()).collect::<Vec<_>>(),
+            vec![text("a"), text("b"), text("normal")]);
+        assert!(h.items[0].pinned);
+        assert!(h.items[1].pinned);
+        assert_eq!(h.items[0].copied_at, 4);
+    }
+
+    #[test]
+    fn full_pinned_history_reports_rejected_image() {
+        let mut h = History::default();
+        for i in 0..50 {
+            h.items.push(Item { entry: text(&i.to_string()), copied_at: i, pinned: true });
+        }
+        let dropped = h.push(Entry::Image { file: "rejected.png".into(), width: 1, height: 1 }, 100);
+        assert_eq!(dropped, vec!["rejected.png"]);
+        assert_eq!(h.items.len(), 50);
+        assert!(h.items.iter().all(|i| i.pinned));
+    }
+
+    #[test]
+    fn clear_keeps_pins_and_reports_only_unpinned_images() {
+        let mut h = History::default();
+        h.push(Entry::Image { file: "keep.png".into(), width: 1, height: 1 }, 1);
+        h.items[0].pinned = true;
+        h.push(Entry::Image { file: "drop.png".into(), width: 1, height: 1 }, 2);
+        h.push(text("drop text"), 3);
+        assert_eq!(h.clear(), vec!["drop.png"]);
+        assert_eq!(h.items.len(), 1);
+        assert!(h.items[0].pinned);
+        assert_eq!(h.items[0].entry, Entry::Image { file: "keep.png".into(), width: 1, height: 1 });
+    }
+
+    #[test]
+    fn toggling_pin_sorts_each_group_by_original_copy_time() {
+        let mut h = History::default();
+        h.push(text("a"), 1);
+        h.push(text("b"), 2);
+        h.push(text("c"), 3);
+        assert!(h.toggle_pin(2));
+        assert_eq!(h.items.iter().map(|i| i.entry.clone()).collect::<Vec<_>>(),
+            vec![text("a"), text("c"), text("b")]);
+        assert!(h.toggle_pin(2));
+        assert_eq!(h.items.iter().map(|i| i.entry.clone()).collect::<Vec<_>>(),
+            vec![text("b"), text("a"), text("c")]);
+        assert!(h.toggle_pin(1));
+        assert_eq!(h.items.iter().map(|i| i.entry.clone()).collect::<Vec<_>>(),
+            vec![text("b"), text("c"), text("a")]);
+        assert_eq!(h.items.iter().map(|i| i.pinned).collect::<Vec<_>>(), vec![true, false, false]);
+        assert_eq!(h.items[2].copied_at, 1);
+    }
+
+    #[test]
+    fn invalid_pin_index_is_harmless() {
+        let mut h = History::default();
+        assert!(!h.toggle_pin(0));
+        h.push(text("keep"), 1);
+        let before = h.items.clone();
+        assert!(!h.toggle_pin(1));
+        assert!(!h.toggle_pin(usize::MAX));
+        assert_eq!(h.items, before);
+    }
+
+    #[test]
+    fn loading_oversized_history_keeps_pins_and_newest_normal_items() {
+        let mut saved = History::default();
+        for i in 1..=60 {
+            saved.items.push(Item { entry: text(&format!("normal {i}")), copied_at: i, pinned: false });
+        }
+        saved.items.push(Item { entry: text("old pin"), copied_at: 0, pinned: true });
+        saved.items.push(Item { entry: text("new pin"), copied_at: 5, pinned: true });
+        let loaded = History::from_json(&serde_json::to_string(&saved).unwrap());
+        assert_eq!(loaded.items.len(), 50);
+        assert_eq!(loaded.items[0].entry, text("new pin"));
+        assert_eq!(loaded.items[1].entry, text("old pin"));
+        assert_eq!(loaded.items[2].entry, text("normal 60"));
+        assert_eq!(loaded.items[49].entry, text("normal 13"));
+    }
+
+    #[test]
+    fn loading_more_than_capacity_pins_keeps_newest_pins() {
+        let mut saved = History::default();
+        for i in 0..55 {
+            saved.items.push(Item { entry: text(&i.to_string()), copied_at: i, pinned: true });
+        }
+        saved.items.push(Item { entry: text("normal"), copied_at: 100, pinned: false });
+        let loaded = History::from_json(&serde_json::to_string(&saved).unwrap());
+        assert_eq!(loaded.items.len(), 50);
+        assert!(loaded.items.iter().all(|i| i.pinned));
+        assert_eq!(loaded.items[0].entry, text("54"));
+        assert_eq!(loaded.items[49].entry, text("5"));
     }
 }

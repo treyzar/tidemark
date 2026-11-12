@@ -1023,6 +1023,9 @@ impl Renderer {
         let title = if media.title.is_empty() { "Без названия" } else { &media.title };
         text(title, &fonts.track_title, r.title, th.text);
         let secondary=if !media.message.is_empty(){media.message.as_str()}else {match hot {
+            Some(Hit::MediaOpen)=>"Открыть Яндекс Музыку",
+            Some(Hit::MediaMute) if media.volume==Some(0)=>"Вернуть звук приложения",
+            Some(Hit::MediaMute)=>"Выключить звук приложения",
             Some(Hit::MediaLike) if media.liked==Some(true)=>"Снять лайк в Яндекс Музыке",
             Some(Hit::MediaLike)=>"Нравится в Яндекс Музыке",
             Some(Hit::MediaCopy)=>"Нажмите, чтобы скопировать название",
@@ -1077,6 +1080,7 @@ impl Renderer {
             let (sx, sy) = (sp.left, (sp.top + sp.bottom) / 2.0);
             self.fill_rect(th.subtext, D2D_RECT_F { left: sx, top: sy - 2.5 * k, right: sx + 4.0 * k, bottom: sy + 2.5 * k }, 0.5 * k);
             self.fill_polygon(th.subtext, &[(sx + 3.0 * k, sy - 2.5 * k), (sx + 8.0 * k, sy - 6.0 * k), (sx + 8.0 * k, sy + 6.0 * k), (sx + 3.0 * k, sy + 2.5 * k)]);
+            if vol==0 {self.line(th.subtext,sx+10.0*k,sy-4.0*k,sx+16.0*k,sy+4.0*k,1.4*k);self.line(th.subtext,sx+10.0*k,sy+4.0*k,sx+16.0*k,sy-4.0*k,1.4*k);}
             let vbar = px(r.volume);
             self.fill_rect(track, vbar, 2.0 * k);
             let x = vbar.left + (vbar.right - vbar.left) * vol as f32 / 100.0;

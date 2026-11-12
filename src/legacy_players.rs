@@ -195,7 +195,7 @@ pub fn command(player: Player, cmd: &Command) {
                     send(h, WM_USER, (v.clamp(0.0, 1.0) * 255.0).round() as usize, IPC_SETVOLUME);
                     return;
                 }
-                Command::Refresh | Command::SeekTo{..} => return,
+                Command::Refresh | Command::MetadataChanged | Command::SetSleepTimer{..} | Command::SeekTo{..} => return,
             };
             send(h, WM_COMMAND, id, 0);
         }
@@ -208,7 +208,7 @@ pub fn command(player: Player, cmd: &Command) {
                 Command::SetVolume(v) => {
                     send(h, WM_AIMP_PROPERTY, PROP_VOLUME | PROP_SET, (v.clamp(0.0, 1.0) * 100.0).round() as isize)
                 }
-                Command::Refresh | Command::SeekTo{..} => None,
+                Command::Refresh | Command::MetadataChanged | Command::SetSleepTimer{..} | Command::SeekTo{..} => None,
             };
         }
         Player::Smtc => {}
