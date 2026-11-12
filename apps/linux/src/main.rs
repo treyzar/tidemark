@@ -44,6 +44,10 @@ mod agent_queue_tests;
 
 #[cfg(target_os = "linux")]
 mod app;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "services/record_state.rs"]
+mod record_state_tests;
 #[cfg(target_os = "linux")]
 mod services;
 #[cfg(target_os = "linux")]

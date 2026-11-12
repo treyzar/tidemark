@@ -175,6 +175,21 @@ pub enum Status {
     Finished,
     Failed(Error),
 }
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum ShutdownAction {
+    None,
+    CancelStart,
+    FinishRecording,
+}
+#[cfg(any(test, target_os = "linux"))]
+fn shutdown_action(status: &Status) -> ShutdownAction {
+    match status {
+        Status::Starting => ShutdownAction::CancelStart,
+        Status::Recording | Status::Stopping => ShutdownAction::FinishRecording,
+        Status::Finished | Status::Failed(_) => ShutdownAction::None,
+    }
+}
 #[cfg(target_os = "linux")]
 mod portal;
 #[cfg(target_os = "linux")]
@@ -201,6 +216,26 @@ mod tests {
         assert!(Options::default()
             .validate(Path::new("relative.webm"))
             .is_err());
+    }
+    #[test]
+    fn shutdown_cancels_consent_but_finalizes_active_capture() {
+        assert_eq!(
+            shutdown_action(&Status::Starting),
+            ShutdownAction::CancelStart
+        );
+        assert_eq!(
+            shutdown_action(&Status::Recording),
+            ShutdownAction::FinishRecording
+        );
+        assert_eq!(
+            shutdown_action(&Status::Stopping),
+            ShutdownAction::FinishRecording
+        );
+        assert_eq!(shutdown_action(&Status::Finished), ShutdownAction::None);
+        assert_eq!(
+            shutdown_action(&Status::Failed(Error::Canceled)),
+            ShutdownAction::None
+        );
     }
     #[test]
     fn pipeline_uses_only_numeric_ids_and_fixed_sink() {

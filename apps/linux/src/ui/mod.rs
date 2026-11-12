@@ -8,6 +8,7 @@ pub mod home;
 pub mod island;
 pub mod launcher;
 pub mod notes;
+pub mod record;
 pub mod settings;
 pub mod shelf;
 pub mod system;

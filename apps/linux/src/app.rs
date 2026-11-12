@@ -212,6 +212,7 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
     let mut step = 0usize;
     let mut settings: Option<adw::PreferencesWindow> = None;
     let mut capture_preview: Option<gtk::ApplicationWindow> = None;
+    let mut record_preview: Option<adw::ApplicationWindow> = None;
     // Every view receives real frames before allocation checks and rendering.
     glib::timeout_add_local(Duration::from_millis(400), move || {
         let result = (|| -> Result<bool, String> {
@@ -297,6 +298,24 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
                     &out_dir.join("capture-editor.png"),
                 )?;
                 editor.close();
+                let app = island
+                    .window
+                    .application()
+                    .and_then(|app| app.downcast::<adw::Application>().ok())
+                    .ok_or("missing GTK application")?;
+                let recording = crate::ui::record::build(&app, true);
+                recording.present();
+                record_preview = Some(recording);
+            } else if step == model::TABS.len() + 5 {
+                let recording = record_preview.as_ref().ok_or("missing recording preview")?;
+                if !recording.is_realized() {
+                    return Err("recording window did not realize".into());
+                }
+                render_png(
+                    &recording.clone().upcast(),
+                    &out_dir.join("recording-window.png"),
+                )?;
+                recording.close();
             } else {
                 island.check_geometry(false)?;
                 render_png(

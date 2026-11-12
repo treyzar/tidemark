@@ -129,8 +129,26 @@ impl Encoder {
             .env_remove("GST_TRACERS");
         let raw = remote.map(AsRawFd::as_raw_fd);
         let max = options.max_bytes;
+        let parent_pid = unsafe { libc::getpid() };
         unsafe {
             command.pre_exec(move || {
+                // Recorder creates the child from the persistent monitor
+                // thread, which owns it through reaping. Linux ties this
+                // signal to that creator THREAD, not just its process ID.
+                if libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGKILL as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Covers parent-process death between fork and prctl.
+                if libc::getppid() != parent_pid {
+                    return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                }
                 if let Some(fd) = raw {
                     let flags = libc::fcntl(fd, libc::F_GETFD);
                     if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
@@ -197,7 +215,15 @@ impl Encoder {
         }
         Ok(None)
     }
+    #[cfg(test)]
     pub fn finish(&mut self, timeout: Duration) -> Result<()> {
+        self.finish_with_abort(timeout, || false)
+    }
+    pub fn finish_with_abort(&mut self, timeout: Duration, abort: impl Fn() -> bool) -> Result<()> {
+        if abort() {
+            self.kill();
+            return Err(Error::Canceled);
+        }
         if let Some(success) = self.poll()? {
             return if success { Ok(()) } else { Err(Error::Encoder) };
         }
@@ -207,6 +233,10 @@ impl Encoder {
         }
         let deadline = Instant::now() + timeout;
         loop {
+            if abort() {
+                self.kill();
+                return Err(Error::Canceled);
+            }
             if let Some(success) = self.poll()? {
                 return if success {
                     Ok(())
@@ -415,6 +445,100 @@ mod tests {
             assert_eq!(encoder.finish(Duration::from_secs(1)), Err(Error::Encoder));
         }
         assert!(!path.exists());
+    }
+    #[test]
+    fn shutdown_abort_interrupts_an_encoder_ignoring_eos() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Output::create(&dir.path().join("shutdown-abort.webm")).unwrap();
+        let mut encoder =
+            Encoder::spawn(fixture("ignore", None), None, &Options::default(), &output).unwrap();
+        wait_ready(&output, &mut encoder);
+        let abort = std::sync::Arc::new(AtomicBool::new(false));
+        let signal = abort.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            signal.store(true, Ordering::Release);
+        });
+        let start = Instant::now();
+        assert_eq!(
+            encoder.finish_with_abort(Duration::from_secs(5), || abort.load(Ordering::Acquire)),
+            Err(Error::Canceled)
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        setter.join().unwrap();
+    }
+    #[test]
+    fn creator_thread_death_kills_even_an_intentionally_unreaped_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parent-death.webm");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let creator = std::thread::spawn(move || {
+            let output = Output::create(&path).unwrap();
+            let mut encoder =
+                Encoder::spawn(fixture("ignore", None), None, &Options::default(), &output)
+                    .unwrap();
+            wait_ready(&output, &mut encoder);
+            let pid = encoder.child.id() as libc::pid_t;
+            // Bypass RAII deliberately: this test proves the kernel lifetime
+            // guard, not Encoder::drop's explicit SIGKILL.
+            std::mem::forget(encoder);
+            tx.send(pid).unwrap();
+        });
+        let pid = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        creator.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == pid {
+                assert!(libc::WIFSIGNALED(status));
+                assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+                break;
+            }
+            assert!(waited >= 0, "owned child was not waitable");
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                }
+                panic!("encoder survived its creator thread");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn caller_thread_can_exit_while_monitor_owns_the_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("monitor-owned.webm");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            std::thread::spawn(move || {
+                let mut output = Output::create(&path).unwrap();
+                let mut encoder = Encoder::spawn(
+                    fixture("graceful", None),
+                    None,
+                    &Options::default(),
+                    &output,
+                )
+                .unwrap();
+                wait_ready(&output, &mut encoder);
+                started_tx.send(encoder.child.id() as libc::pid_t).unwrap();
+                stop_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                encoder.finish(Duration::from_secs(2)).unwrap();
+                output.commit().unwrap();
+            })
+        });
+        let monitor = caller.join().unwrap();
+        let pid = started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "caller exit killed a monitor-owned child"
+        );
+        stop_tx.send(()).unwrap();
+        monitor.join().unwrap();
     }
     #[test]
     #[ignore = "requires installed GStreamer Good/base plugins; synthetic videotestsrc only"]

@@ -228,6 +228,16 @@ impl ControlView {
             }
         });
         root.append(&capture);
+        let recording = text_button("Запись экрана · WebM без звука");
+        recording.set_sensitive(!shared.smoke);
+        recording.connect_clicked(move |_| {
+            if let Some(app) = gtk::gio::Application::default()
+                .and_then(|app| app.downcast::<adw::Application>().ok())
+            {
+                crate::ui::record::build(&app, smoke).present();
+            }
+        });
+        root.append(&recording);
         let system = crate::ui::system::SystemView::build(shared.smoke);
         root.append(&system.root);
 

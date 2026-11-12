@@ -9,6 +9,7 @@
 - `request_stop()` requests graceful EOS without blocking the GTK thread. Continue polling for the final result.
 - `stop(self) -> Result<PathBuf>` waits on a worker for graceful stop and cleanup. A timeout/error is not a saved-file result.
 - Dropping a recorder requests asynchronous abort. The owned monitor interrupts/reaps the encoder, closes the portal session and removes its uncommitted output. A replacement file at the output path is preserved. Do not immediately advertise a completed file after dropping the handle.
+- `Recorder::shutdown_all(grace) -> bool` is an irreversible process-shutdown gate: future starts are rejected, pending consent is cancelled without waiting for the dialog, and an active encoder receives graceful EOS. It waits at most five seconds of grace plus one second for forced abort. The boolean reports child cleanup only; it never proves a saved file. The GTK shutdown hook uses two seconds of grace.
 
 `Options::audio = true` returns `AudioUnsupported` before any portal request. No microphone or implicit default audio source is selected. Sources are monitor, window or either; one source is requested. Cursor embedding is checked against the portal's advertised modes.
 
@@ -20,13 +21,15 @@ The encoder is fixed at `/usr/bin/gst-launch-1.0`. It receives only fixed VP8/We
 
 The encoder owns its process group. Stop sends SIGINT so `-e` can finalize EOS; failure to stop by the deadline kills/reaps that owned group. Stderr is drained without retaining private diagnostics and capped at 64 KiB. The output size has a process-level file-size cap and monitor checks; maximum recording duration is bounded. A successful encoder exit, WebM header/cluster checks, output inode identity and `sync_all` are required before returning a saved path.
 
+The persistent monitor performs portal setup, creates the encoder and owns it through reaping. In the child, `PR_SET_PDEATHSIG(SIGKILL)` plus a parent-PID recheck covers abrupt creator/process death. Linux ties that signal to the creator thread, so spawning on a short-lived caller and then transferring the child would be incorrect; this backend deliberately starts the child in its monitor. Forced shutdown can interrupt the EOS wait. Abrupt termination can leave an incomplete file and is never reported as a successful save.
+
 Required Ubuntu runtime packages are `gstreamer1.0-tools`, `gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base` and `gstreamer1.0-plugins-good`. Their presence and the actual PipeWire source properties must be checked by the native CI/package owner.
 
 The GStreamer launcher documentation recommends the library API for applications and describes the launcher as a debugging tool. This slice deliberately recovers the existing process-based design requested for this backend; native CLI/plugin compatibility is therefore an acceptance gate, and migration to the GStreamer Rust bindings remains a possible follow-up. The child-process checks do not replace that compatibility test.
 
 ## Verification actually performed on Windows
 
-- `cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked`: three portable option/pipeline tests pass.
+- `cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked`: four portable option/pipeline/shutdown-policy tests pass.
 - `cargo fmt --manifest-path crates/tidemark-record/Cargo.toml --check`: passes after recovering two formatting-only differences.
 - `cargo check --manifest-path crates/tidemark-record/Cargo.toml --target x86_64-unknown-linux-gnu --all-targets --locked`: passes.
 - Linux-target and Windows-target clippy with `--all-targets -- -D warnings`: pass.
@@ -38,6 +41,8 @@ dbus-run-session -- cargo test --manifest-path crates/tidemark-record/Cargo.toml
 ```
 
 Fixtures cover response-before-return, canonical lifecycle and Unix FD transfer, cancellation/failure, timeout cleanup, wrong sender/path/owner, revoked sessions, invalid FDs, multiple streams, parent/child FD flags, graceful SIGINT output, forced kill, stderr overflow, encoder rejection and output/replacement preservation. They do not contact a desktop or a real PipeWire server.
+
+Additional native fixtures cover consent-time shutdown returning promptly, EOS requests without downgrading an existing abort, forced interruption of an encoder ignoring EOS, parent-thread death killing an intentionally unreaped child, and an outer caller exiting while the persistent monitor legitimately continues. These compile but still require the Linux run above.
 
 After installing the GStreamer packages, also run the explicit synthetic encoder test:
 
@@ -53,4 +58,5 @@ That test records only `videotestsrc`. It is ignored by default because it requi
 - [Portal request handles and early response subscription](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)
 - [Portal session lifecycle](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Session.html)
 - [GStreamer command-line launcher and EOS option](https://gstreamer.freedesktop.org/documentation/tools/gst-launch.html)
+- [Linux parent-death signal and creator-thread lifetime](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html)
 - [WebM muxer](https://gstreamer.freedesktop.org/documentation/matroska/webmmux.html)
