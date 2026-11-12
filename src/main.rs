@@ -9,6 +9,7 @@ mod beat;
 mod bb;
 mod bb_endpoint;
 mod bb_layout;
+mod bb_island;
 mod brand;
 mod capture;
 mod clip_history;

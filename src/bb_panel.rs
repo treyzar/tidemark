@@ -1,8 +1,8 @@
 //! Native bb panel, on its own UI thread. No network calls in window procedures.
 use super::*;
 use crate::{
+    bb::panel::visual::palette as skin,
     bb_layout::{layout, Rect},
-    settings::skin,
 };
 #[path = "bb_skin.rs"]
 mod visual;
@@ -13,6 +13,27 @@ use windows::Win32::{
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*},
 };
 static OPEN: AtomicBool = AtomicBool::new(false);
+static CONNECTION_REQUESTED: AtomicBool = AtomicBool::new(false);
+const WM_CONNECTION: u32 = WM_APP + 60;
+pub fn open_connection() {
+    CONNECTION_REQUESTED.store(true, Ordering::SeqCst);
+    open();
+}
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: *mut std::ffi::c_void,
+        attribute: u32,
+        data: *const std::ffi::c_void,
+        size: u32,
+    ) -> i32;
+}
+unsafe fn style_caption(hwnd: HWND) {
+    let dark = 1i32;
+    let bg = skin::color(skin::BG).0;
+    let _ = DwmSetWindowAttribute(hwnd.0, 20, &dark as *const _ as *const _, 4);
+    let _ = DwmSetWindowAttribute(hwnd.0, 35, &bg as *const _ as *const _, 4);
+}
 const URL: i32 = 101;
 const TOKEN: i32 = 102;
 const SAVE: i32 = 103;
@@ -727,6 +748,9 @@ pub fn open() {
             if let Ok(h) = FindWindowW(w!("TidemarkBbPanel"), None) {
                 let _ = ShowWindow(h, SW_RESTORE);
                 let _ = SetForegroundWindow(h);
+                if CONNECTION_REQUESTED.swap(false, Ordering::SeqCst) {
+                    let _ = PostMessageW(Some(h), WM_CONNECTION, WPARAM(0), LPARAM(0));
+                }
             }
         }
         return;
@@ -746,11 +770,11 @@ pub fn open() {
         };
         RegisterClassW(&wc);
         let dpi = ui_dpi();
-        let height = ((GetSystemMetrics(SM_CYSCREEN) - 96) * 96 / dpi as i32 - 40).clamp(620, 740);
+        let height = ((GetSystemMetrics(SM_CYSCREEN) - 96) * 96 / dpi as i32 - 40).clamp(620, 660);
         let mut bounds = RECT {
             left: 0,
             top: 0,
-            right: skin::scale(760, dpi),
+            right: skin::scale(600, dpi),
             bottom: skin::scale(height, dpi),
         };
         let _ = AdjustWindowRectExForDpi(
@@ -777,6 +801,7 @@ pub fn open() {
             Some(instance.into()),
             None,
         ) {
+            style_caption(hwnd);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             let mut msg = MSG::default();
@@ -838,6 +863,16 @@ fn ui_dpi() -> u32 {
 }
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_CONNECTION => {
+            PANEL.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.connection_page = true;
+                    p.layout();
+                }
+            });
+            publish_render();
+            return LRESULT(0);
+        }
         WM_CREATE => {
             let dpi = ui_dpi();
             let c = connection();
@@ -851,7 +886,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 loaded: false,
                 selected_thread: 0,
                 selected_item: 0,
-                connection_page: c.token.is_empty(),
+                connection_page: CONNECTION_REQUESTED.swap(false, Ordering::SeqCst)
+                    || c.token.is_empty(),
                 dpi,
                 fonts: [
                     skin::font(15, 400, dpi),
@@ -1103,7 +1139,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 skin::color(if white { visual::WHITE } else { skin::BG }),
             );
             if white {
-                return LRESULT(GetStockObject(WHITE_BRUSH).0 as isize);
+                SetDCBrushColor(dc, skin::color(visual::WHITE));
+                return LRESULT(GetStockObject(DC_BRUSH).0 as isize);
             }
             return LRESULT(
                 RENDER

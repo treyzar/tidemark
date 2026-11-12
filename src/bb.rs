@@ -21,6 +21,7 @@ use windows::{
 };
 pub const WM_UPDATE: u32 = WM_APP + 42;
 pub const WM_OPEN: u32 = WM_APP + 43;
+pub const WM_RESULT:u32=WM_APP+44;
 static ISLAND: AtomicIsize = AtomicIsize::new(0);
 static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
 #[derive(Clone, Default)]
@@ -302,12 +303,12 @@ pub fn start(hwnd: HWND) {
                             s.data = data;
                             s.error.clear();
                             s.revision += 1;
-                            if notify {
+                            {
                                 unsafe {
                                     let _ = PostMessageW(
                                         Some(HWND(ISLAND.load(Ordering::Relaxed) as *mut _)),
                                         WM_UPDATE,
-                                        WPARAM(0),
+                                        WPARAM(usize::from(notify)),
                                         LPARAM(0),
                                     );
                                 }
@@ -322,6 +323,7 @@ pub fn start(hwnd: HWND) {
                             s.revision += 1;
                         }
                     }
+                    if !s.error.is_empty(){unsafe{let _=PostMessageW(Some(HWND(ISLAND.load(Ordering::Relaxed) as *mut _)),WM_UPDATE,WPARAM(0),LPARAM(0));}}
                 }
             }
             std::thread::sleep(Duration::from_secs(3));
@@ -342,8 +344,10 @@ pub fn pending_title() -> Option<String> {
         })
 }
 pub fn open(_owner: HWND) {
-    panel::open();
+    unsafe{let _=PostMessageW(Some(_owner),WM_OPEN,WPARAM(0),LPARAM(0));}
 }
+pub fn open_panel(){panel::open();}
+pub fn open_settings(){panel::open_connection();}
 #[cfg(test)]
 mod tests {
     use super::*;

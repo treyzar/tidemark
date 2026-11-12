@@ -1,10 +1,19 @@
 //! Calm native bb surfaces, using Tidemark's existing settings palette.
-use crate::{
-    bb_layout::{layout, Rect},
-    settings::skin::{self, Canvas},
-};
+use crate::bb_layout::{layout, Rect};
+use crate::settings::skin::Canvas;
+use palette as skin;
+pub(super) mod palette {
+    pub use crate::settings::skin::{caption, color, font, scale, Canvas};
+    pub const BG: u32 = 0x080A0E;
+    pub const SIDE: u32 = 0x181D25;
+    pub const INK: u32 = 0xEDF1F7;
+    pub const MUTED: u32 = 0x8F99AB;
+    pub const LINE: u32 = 0x252D39;
+    pub const ACCENT: u32 = 0x7BAEFF;
+    pub const SELECT: u32 = 0x1E2D43;
+}
 use windows::Win32::Graphics::Gdi::*;
-pub const WHITE: u32 = 0xFFFFFF;
+pub const WHITE: u32 = 0x11161D;
 pub unsafe fn wrapped(c: &Canvas, s: &str, r: Rect, font: usize, color: u32) {
     let old = SelectObject(c.dc, c.fonts[font].into());
     SetTextColor(c.dc, skin::color(color));
@@ -40,12 +49,13 @@ pub unsafe fn paint(
     focus_reply: bool,
 ) {
     c.fill(0, 0, width, height, skin::BG);
-    c.mark(28, 24);
+    c.round(28, 24, 36, 36, 12, skin::SIDE);
+    c.text("bb", 34, 28, 28, 28, 0, skin::ACCENT);
     c.text(
         if connection {
             "Подключение к bb"
         } else {
-            "Агенты bb"
+            "bb"
         },
         80,
         21,
@@ -58,7 +68,7 @@ pub unsafe fn paint(
         if connection {
             "Один раз настройте связь с вашим рабочим пространством"
         } else {
-            "Вопросы, ответы и продолжение работы"
+            "Ответьте агенту и продолжайте работу"
         },
         80,
         56,
@@ -157,7 +167,7 @@ pub unsafe fn button(
         skin::SIDE
     } else if primary {
         if pressed || hovered {
-            0x853A28
+            0x99BFFF
         } else {
             skin::ACCENT
         }
@@ -218,7 +228,7 @@ pub unsafe fn choice(
         width - 4,
         height - 8,
         9,
-        if selected { 0xF4EAE4 } else { WHITE },
+        if selected { 0x16263C } else { WHITE },
     );
     let y = height / 2 - 9;
     if multi {

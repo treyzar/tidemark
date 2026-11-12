@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use crate::media::{Cover, COVER_PX};
 use crate::theme::{Rgba, Theme};
+#[path="bb_render.rs"] mod bb_render;
+#[cfg(test)] #[path="bb_preview.rs"] mod bb_preview;
 use crate::weather::Icon;
 use std::f32::consts::{PI, TAU};
 use windows::core::{w, Interface, Result};
@@ -35,6 +37,7 @@ pub struct Shape {
 
 /// One frame's worth of state.
 pub struct Scene<'a> {
+    pub bb:Option<&'a crate::bb_island::View>,
     pub shape: Shape,
     /// Signed amplitude of the liquid bottom edge, in pixels.
     pub wobble: f32,
@@ -295,6 +298,7 @@ const WAVE_SEGMENTS: usize = 40;
 
 #[derive(PartialEq)]
 struct HomeKey {
+    bb:Option<crate::bb_island::View>,
     control: Option<ControlView>,
     text: Option<TextView>,
     shelf: Vec<ClipRow>,
@@ -1489,6 +1493,7 @@ impl Renderer {
     /// every tile and glyph, which is what made WARP expensive.
     fn ensure_home_layer(&mut self, scene: &Scene) -> Result<bool> {
         let key = HomeKey {
+            bb:if scene.tab==Tab::Bb{scene.bb.cloned()}else{None},
             recording: scene.recording,
             control: if scene.tab == Tab::Control { scene.control.cloned() } else { None },
             text: if scene.tab == Tab::Text { scene.text.cloned() } else { None },
@@ -1534,6 +1539,7 @@ impl Renderer {
         }
         self.paint_tabs(scene);
         match scene.tab {
+            Tab::Bb=>{if let Some(view)=scene.bb{self.paint_bb(scene,view);}},
             Tab::Search => {}
             Tab::Home => self.paint_tiles(scene),
             Tab::Clipboard => self.paint_list(scene, scene.clip_page, Hit::Clip, "История пуста — скопируйте что-нибудь"),
@@ -1566,10 +1572,11 @@ impl Renderer {
             if active || scene.hot == Some(Hit::Tab(tab)) {
                 self.fill_rect(if active { th.tile_hover } else { th.tile }, r, 14.0 * k);
             }
-            let icon = D2D_RECT_F { right: r.left + 34.0 * k, ..r };
+            let icon = D2D_RECT_F { right: if tab==Tab::Bb{r.right}else{r.left + 34.0 * k}, ..r };
             let (cx, cy) = ((icon.left + icon.right) / 2.0, (icon.top + icon.bottom) / 2.0);
             let ink = if active { th.text } else { th.subtext };
             match tab {
+                Tab::Bb=>{unsafe{self.brush.SetColor(&color(ink,1.0));let t:Vec<u16>="bb".encode_utf16().collect();self.dc.DrawText(&t,&fonts.small_center,&icon,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP,DWRITE_MEASURING_MODE_NATURAL);}},
                 Tab::Home => {
                     self.fill_polygon(ink, &[(cx - 6.0 * k, cy - 0.5 * k), (cx, cy - 6.0 * k), (cx + 6.0 * k, cy - 0.5 * k)]);
                     self.fill_rect(ink, D2D_RECT_F { left: cx - 4.5 * k, top: cy - 1.0 * k, right: cx + 4.5 * k, bottom: cy + 5.5 * k }, 1.0 * k);
@@ -1615,7 +1622,7 @@ impl Renderer {
                     }
                 }
             }
-            if active {
+            if active&&tab!=Tab::Bb {
                 unsafe {
                     self.brush.SetColor(&color(th.text, 1.0));
                     let label = D2D_RECT_F { left: icon.right - 4.0 * k, ..r };
@@ -1653,12 +1660,14 @@ impl Renderer {
             }
         }
         let inner_w = (r.right - r.left - 2.0 * pad).max(1.0);
-        let inner_h = (r.bottom - r.top).max(1.0);
+        let inner_h = (r.bottom - r.top-2.0*pad).max(1.0);
         let shown = if field.is_empty() { placeholder } else { &field.text };
         let wide: Vec<u16> = shown.encode_utf16().collect();
         unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&wide, fmt, inner_w, inner_h) else { return };
-            let origin = pt(r.left + pad, r.top);
+            let Ok(layout) = self.dwrite.CreateTextLayout(&wide, fmt, inner_w, if field.multiline{100000.0}else{inner_h}) else { return };
+            let mut scroll=0.0;
+            if focused&&field.multiline&&!field.is_empty(){let (mut x,mut y)=(0.0,0.0);let mut caret=DWRITE_HIT_TEST_METRICS::default();if layout.HitTestTextPosition(field.caret_utf16(),false,&mut x,&mut y,&mut caret).is_ok(){scroll=(y+caret.height-inner_h).max(0.0);}}
+            let origin = pt(r.left + pad, r.top+pad-scroll);
             self.dc.PushAxisAlignedClip(&r, D2D1_ANTIALIAS_MODE_ALIASED);
             if focused && !field.is_empty() {
                 if let Some((start, len)) = field.selection_utf16() {

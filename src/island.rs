@@ -130,6 +130,8 @@ const HOTKEY_LAUNCHER: i32 = 2;
 const HOTKEY_LIKE:i32=3;
 
 pub struct Island {
+    bb:crate::bb_island::Client,
+    bb_view:Option<crate::bb_island::View>,
     hwnd: HWND,
     cfg: Config,
     theme: Theme,
@@ -292,6 +294,7 @@ enum SearchHit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    Bb,
     None,
     Note,
     Remind,
@@ -375,6 +378,8 @@ pub fn create(cfg: Config) -> Result<HWND> {
         )?;
 
         let mut island = Island {
+            bb:crate::bb_island::Client::default(),
+            bb_view:None,
             hwnd,
             theme: Theme::resolve(&cfg),
             tiles: Vec::new(),
@@ -620,7 +625,7 @@ impl Island {
         self.tiles = tiles;
         self.home_height = home_height + HOME_OFFSET;
         self.panel_height = self.tab_height(self.tab);
-        let panel_height = self.home_height.max(layout::TAB_BAR_H + layout::PAGE_H);
+        let panel_height = self.home_height.max(layout::TAB_BAR_H + layout::PAGE_H).max(crate::bb_island::HEIGHT);
         self.hovered_tile = None;
         if self.hovered {
             self.height.target = self.panel_height;
@@ -1052,6 +1057,19 @@ impl Island {
             return layout::tab_buttons(self.tab).into_iter().find(|(_, r)| r.contains(dx, dy)).map(|(t, _)| Hit::Tab(t));
         }
         match self.tab {
+            Tab::Bb=>{
+                let v=self.bb_view.as_ref()?;let r=crate::bb_island::regions(self.cfg.expanded_width,self.panel_height,v);
+                if r.thread.contains(dx,dy){return Some(Hit::BbThread)}
+                if r.window.contains(dx,dy){return Some(Hit::BbWindow)}
+                if r.settings.contains(dx,dy){return Some(Hit::BbSettings)}
+                if r.send.contains(dx,dy){return Some(Hit::BbSend)}
+                if v.picker{if r.field.contains(dx,dy){return Some(Hit::BbField)}return r.rows.iter().position(|r|r.contains(dx,dy)).map(Hit::BbThreadRow)}
+                if r.mode.contains(dx,dy){return Some(Hit::BbMode)}
+                if v.pending>1&&r.next.contains(dx,dy){return Some(Hit::BbNext)}
+                if (v.can_back||v.approval)&&r.back.contains(dx,dy){return Some(Hit::BbBack)}
+                if v.allow_text&&r.field.contains(dx,dy){return Some(Hit::BbField)}
+                return r.choices.iter().position(|r|r.contains(dx,dy)).map(Hit::BbOption)
+            },
             Tab::Home | Tab::Search => {}
             Tab::Clipboard => {
                 let w = self.cfg.expanded_width - 2.0 * layout::PAD;
@@ -1182,6 +1200,17 @@ impl Island {
         let hit=self.hit_at(x,y);
         if matches!(hit,Some(Hit::WinPin|Hit::WinOpacity|Hit::WinMinimize|Hit::WinActivate|Hit::WinMenu)) {self.window_message.clear();}
         match hit {
+            Some(Hit::BbThread)=>{self.bb.toggle_picker();self.set_focus(Focus::Bb);self.refresh_bb();},
+            Some(Hit::BbWindow)=>{self.set_focus(Focus::None);crate::bb::open_panel();},
+            Some(Hit::BbSettings)=>{self.set_focus(Focus::None);crate::bb::open_settings();},
+            Some(Hit::BbMode)=>{self.bb.compose();self.set_focus(if self.bb.view(false).allow_text{Focus::Bb}else{Focus::None});self.refresh_bb();},
+            Some(Hit::BbNext)=>{self.bb.next_request();self.refresh_bb();},
+            Some(Hit::BbOption(n))=>{self.bb.choose(n);self.refresh_bb();},
+            Some(Hit::BbField)=>{self.set_focus(Focus::Bb);self.refresh_bb();},
+            Some(Hit::BbSend)=>{self.bb.submit(self.hwnd.0 as isize,false);self.refresh_bb();},
+            Some(Hit::BbBack)=>{if self.bb.view(false).approval{self.bb.submit(self.hwnd.0 as isize,true);}else{self.bb.back();}self.refresh_bb();},
+            Some(Hit::BbThreadRow(n))=>{self.bb.choose_thread(n);self.set_focus(if self.bb.view(false).allow_text{Focus::Bb}else{Focus::None});self.refresh_bb();},
+
             Some(Hit::MediaPlay) => {
                 // Flip the icon now; the player's own event confirms it.
                 if let Some(m) = self.media.as_mut() {
@@ -1327,6 +1356,7 @@ impl Island {
 
     fn tab_height(&self, tab: Tab) -> f32 {
         match tab {
+            Tab::Bb=>crate::bb_island::HEIGHT,
             Tab::Home => self.home_height,
             Tab::Search => layout::SEARCH_H,
             _ => layout::TAB_BAR_H + layout::PAGE_H,
@@ -1339,6 +1369,7 @@ impl Island {
         }
         self.set_focus(Focus::None);
         self.tab = tab;
+        if tab==Tab::Bb{self.bb.sync(true);self.refresh_bb();}
         self.panel_height = self.tab_height(tab);
         if self.hovered {
             self.height.target = self.panel_height;
@@ -1362,6 +1393,15 @@ impl Island {
         }
     }
 
+    fn refresh_bb(&mut self){self.bb_view=Some(self.bb.view(self.focus==Focus::Bb));self.dirty=true;self.last_frame=None;}
+    fn open_bb(&mut self){
+        self.bb.sync(true);self.bb.picker=false;
+        if self.alarm==Some(Alarm::Bb){self.dismiss_alarm();}
+        self.switch_tab(Tab::Bb);self.bb_waiting=false;
+        if self.fullscreen{self.slide_in();}
+        self.set_hover(true);self.set_focus(if self.bb.view(false).allow_text{Focus::Bb}else{Focus::None});self.refresh_bb();
+    }
+
     fn set_focus(&mut self, focus: Focus) {
         if focus == self.focus {
             return;
@@ -1382,6 +1422,7 @@ impl Island {
             }
         }
         self.focus = focus;
+        if self.tab==Tab::Bb{self.refresh_bb();}
         self.refresh_text_view();
         if focus != Focus::None {
             // Typing needs the keyboard: make the island the active window.
@@ -1395,6 +1436,7 @@ impl Island {
 
     fn field(&mut self) -> Option<&mut TextField> {
         match self.focus {
+            Focus::Bb=>Some(self.bb.input()),
             Focus::Note => Some(&mut self.note),
             Focus::Remind => Some(&mut self.remind),
             Focus::Search => Some(&mut self.search),
@@ -1405,6 +1447,7 @@ impl Island {
     }
 
     fn after_edit(&mut self) {
+        if self.focus==Focus::Bb{self.bb.edited();self.refresh_bb();return;}
         if self.focus == Focus::Password {
             self.refresh_control_view();
             return;
@@ -1435,6 +1478,7 @@ impl Island {
 
     /// A typed character (WM_CHAR).
     fn char_input(&mut self, unit: u16) {
+        if self.focus==Focus::Bb&&(self.bb.busy||!self.bb.picker&&!self.bb.view(false).allow_text){return;}
         if self.focus == Focus::None {
             return;
         }
@@ -1461,8 +1505,11 @@ impl Island {
         }
         let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
         let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
+        if self.focus==Focus::Bb&&VIRTUAL_KEY(vk)==VK_ESCAPE{self.set_focus(Focus::None);unsafe{SetTimer(Some(self.hwnd),TIMER_COLLAPSE,COLLAPSE_DELAY_MS,None);}return true;}
+        if self.focus==Focus::Bb&&self.bb.busy{return true;}
+        if self.focus==Focus::Bb&&ctrl&&VIRTUAL_KEY(vk)==VK_RETURN{self.bb.submit(self.hwnd.0 as isize,false);self.refresh_bb();return true;}
         let hwnd = self.hwnd;
-        let multiline = matches!(self.focus, Focus::Note | Focus::Text);
+        let multiline = matches!(self.focus, Focus::Note | Focus::Text)||self.focus==Focus::Bb&&!self.bb.picker;
         if self.focus == Focus::Search {
             let n = self.search_hits.len();
             match VIRTUAL_KEY(vk) {
@@ -1495,6 +1542,7 @@ impl Island {
             return true;
         }
         match VIRTUAL_KEY(vk) {
+            VK_RETURN if self.focus==Focus::Bb&&self.bb.picker=>{self.bb.choose_thread(0);self.set_focus(Focus::Bb);self.refresh_bb();return true;},
             VK_ESCAPE => {
                 self.set_focus(Focus::None);
                 unsafe {
@@ -2982,11 +3030,13 @@ impl Island {
 
         let shape = self.shape();
         self.update_region(&shape);
+        let bb_theme=crate::bb_island::theme();
         let scene = Scene {
+            bb:self.bb_view.as_ref(),
             shape,
             wobble: self.wobble.value * self.scale,
             phase: self.phase,
-            theme: &self.theme,
+            theme: if self.tab==Tab::Bb{&bb_theme}else{&self.theme},
             content_alpha: self.content_alpha(),
             origin: self.panel_origin(&shape),
             scale: self.scale,
@@ -3217,6 +3267,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             return LRESULT(0);
         }
+        WM_MOUSEWHEEL=>{
+            with_island(|i|{if i.tab==Tab::Bb{
+                let mut point=POINT{x:(lparam.0 as u32&0xffff) as i16 as i32,y:((lparam.0 as u32>>16)&0xffff) as i16 as i32};let _=ScreenToClient(hwnd,&mut point);
+                let (ox,oy)=i.panel_origin(&i.shape());let (x,y)=((point.x as f32-ox)/i.scale,(point.y as f32-oy)/i.scale);
+                let body=i.bb_view.as_ref().is_some_and(|v|!v.picker&&crate::bb_island::regions(i.cfg.expanded_width,i.panel_height,v).prompt.contains(x,y));
+                i.bb.scroll_list(((wparam.0>>16) as u16 as i16)<0,body);i.refresh_bb();
+            }});return LRESULT(0);
+        },
         WM_RBUTTONUP => {
             let (x, y) = mouse_pos(lparam);
             with_island(|i| i.context_menu(x, y));
@@ -3437,13 +3495,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| i.agent_arrived());
             return LRESULT(0);
         }
-        crate::bb::WM_OPEN => { crate::bb::open(hwnd); return LRESULT(0); }
+        crate::bb::WM_OPEN => {with_island(|i|i.open_bb());return LRESULT(0);}
+        crate::bb::WM_RESULT=>{with_island(|i|{i.bb.sync(false);i.refresh_bb();});return LRESULT(0);}
         crate::bb::WM_UPDATE => {
             with_island(|i| {
-                i.bb_waiting = crate::bb::pending_title().is_some();
+                i.bb.sync(false);if i.tab==Tab::Bb{i.refresh_bb();}
+                if wparam.0==1{i.bb_waiting=crate::bb::pending_title().is_some();}
                 if crate::bb::pending_title().is_some() {
-                    if i.alarm == Some(Alarm::Bb) { i.raise_alarm(Alarm::Bb); i.bb_waiting = false; }
-                    else { i.next_agent_card(); }
+                    if wparam.0==1{if i.alarm==Some(Alarm::Bb){i.raise_alarm(Alarm::Bb);i.bb_waiting=false;}else{i.next_agent_card();}}
                 } else if i.alarm == Some(Alarm::Bb) { i.dismiss_alarm(); i.next_agent_card(); }
             });
             return LRESULT(0);

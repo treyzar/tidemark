@@ -235,6 +235,7 @@ pub fn media_regions(tile: &Placed) -> MediaRegions {
 /// Something clickable on the Home view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
+    BbThread, BbWindow, BbSettings, BbMode, BbNext, BbOption(usize), BbField, BbSend, BbBack, BbThreadRow(usize),
     MediaPrev,
     MediaPlay,
     MediaNext,
@@ -290,6 +291,7 @@ pub enum Hit {
 /// Views of the open island, shown as a row of tabs on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Bb,
     Home,
     Clipboard,
     Notes,
@@ -300,7 +302,8 @@ pub enum Tab {
     Search,
 }
 
-pub const TABS: [Tab; 6] = [
+pub const TABS: [Tab; 7] = [
+    Tab::Bb,
     Tab::Home,
     Tab::Clipboard,
     Tab::Notes,
@@ -312,6 +315,7 @@ pub const TABS: [Tab; 6] = [
 impl Tab {
     pub fn title(self) -> &'static str {
         match self {
+            Tab::Bb => "bb",
             Tab::Home => "Главная",
             Tab::Clipboard => "Буфер",
             Tab::Notes => "Заметки",
@@ -333,7 +337,7 @@ pub fn tab_buttons(active: Tab) -> Vec<(Tab, Rect)> {
     let mut x = PAD;
     TABS.iter()
         .map(|&t| {
-            let w = if t == active { 100.0 } else { 34.0 };
+            let w = if t == active&&t==Tab::Bb {54.0}else if t == active { 100.0 } else { 34.0 };
             let r = Rect {
                 x,
                 y: 10.0,
@@ -975,8 +979,10 @@ mod tests {
     #[test]
     fn tabs_and_pages_fit() {
         let tabs = tab_buttons(Tab::Notes);
-        assert_eq!(tabs.len(), 6);
-        assert_eq!(tabs[2].1.w, 100.0);
+        assert_eq!(tabs.len(), 7);
+        assert_eq!(tabs.iter().find(|(tab,_)|*tab==Tab::Notes).unwrap().1.w, 100.0);
+        let bb_tabs=tab_buttons(Tab::Bb);
+        assert!(bb_tabs.last().unwrap().1.x+bb_tabs.last().unwrap().1.w<560.0);
         let r = notes_regions(560.0);
         assert!(r.note_card.x + r.note_card.w < r.timer_card.x);
         assert!(r.timer_card.y + r.timer_card.h <= r.remind_card.y);
