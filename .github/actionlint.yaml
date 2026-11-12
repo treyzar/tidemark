@@ -1,0 +1,6 @@
+# actionlint 1.7.12 does not yet list this hosted label. GitHub announced it
+# generally available: https://github.com/actions/runner-images/issues/14747
+# This is actionlint's mechanism for declaring additional valid labels.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

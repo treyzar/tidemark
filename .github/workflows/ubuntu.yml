@@ -2,7 +2,7 @@ name: Ubuntu port checks
 
 on:
   push:
-    branches: [feature/ubuntu-support]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
