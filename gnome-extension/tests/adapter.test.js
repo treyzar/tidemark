@@ -141,6 +141,28 @@ function island(p, id = 1) {
 
 const err = kind => e => e instanceof AdapterError && e.kind === kind;
 
+test('primary monitor snapshot precedes per-monitor fullscreen and follows monitor changes', () => {
+    const { p, a, sink } = setup(p => {
+        p.primary.index = 1;
+        p.fullscreen = [true, false];
+    });
+    assert.equal(a.primaryMonitor, 1);
+    sink.take();
+    a.emitSnapshot();
+    const events = sink.take();
+    const primaryAt = events.findIndex(([name]) => name === 'PrimaryMonitorChanged');
+    const fullAt = events.findIndex(([name]) => name === 'FullscreenChanged');
+    assert.deepEqual(events[primaryAt], ['PrimaryMonitorChanged', [1]]);
+    assert.ok(primaryAt < fullAt);
+    p.primary.index = 0;
+    a.onMonitorsChanged();
+    assert.equal(a.primaryMonitor, 0);
+    assert.deepEqual(sink.take().filter(([name]) => name === 'PrimaryMonitorChanged'),
+        [['PrimaryMonitorChanged', [0]]]);
+    a.onMonitorsChanged();
+    assert.ok(!sink.take().some(([name]) => name === 'PrimaryMonitorChanged'));
+});
+
 test('launches /usr/bin/tidemark once and authenticates only its pid', () => {
     const { p, a, sink } = setup();
     assert.deepEqual(p.spawned, [['/usr/bin/tidemark']]);
@@ -445,7 +467,8 @@ test('Hello snapshot carries the current state', () => {
     assert.deepEqual(a.hello(), { version: 1, capabilities: C.IMPLEMENTED_CAPABILITIES });
     a.emitSnapshot();
     assert.deepEqual(sink.take(), [
-        ['FocusChanged', [null]], ['FullscreenChanged', [1, true]], ['MaximizedTopChanged', [false]],
+        ['FocusChanged', [null]], ['PrimaryMonitorChanged', [0]],
+        ['FullscreenChanged', [1, true]], ['MaximizedTopChanged', [false]],
         ['LayoutChanged', ['RU']], ['CapsLock', [true]],
     ]);
     void p;

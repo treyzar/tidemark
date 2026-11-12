@@ -244,6 +244,7 @@ async function phase1() {
 
     await check('open properties before Hello', async () => {
         assert(await prop('Version') === C.CONTRACT_VERSION, 'Version');
+        assert(await prop('PrimaryMonitor') === 0, 'primary monitor of the private single-monitor session');
         const caps = await prop('Capabilities');
         assert(JSON.stringify(caps) === JSON.stringify(C.IMPLEMENTED_CAPABILITIES), `Capabilities ${caps}`);
         const state = await prop('ClientState');
@@ -262,6 +263,8 @@ async function phase1() {
         const [focus] = await waitSignal('FocusChanged', () => true, 3000, helloAt);
         assert(Object.keys(focus).length === 0, `expected empty a{sv} (None), got ${JSON.stringify(focus)}`);
         const [caps2] = await waitSignal('CapsLock', () => true, 3000, helloAt);
+        const [primary] = await waitSignal('PrimaryMonitorChanged', () => true, 3000, helloAt);
+        assert(primary === 0, 'PrimaryMonitor snapshot');
         assert(caps2 === false, 'CapsLock snapshot');
         await waitSignal('MaximizedTopChanged', a => a[0] === false, 3000, helloAt);
         return `pid ${ownPid}`;

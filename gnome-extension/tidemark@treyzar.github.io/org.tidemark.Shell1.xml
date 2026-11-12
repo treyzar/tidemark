@@ -8,7 +8,7 @@
     (iiii) = (x, y, w, h). Signals are sent only to the authenticated client
     (unicast), never broadcast.
 
-    Access: Version, Capabilities, ClientState, RequestLaunch and RequestHandover
+    Access: Version, Capabilities, ClientState, PrimaryMonitor, RequestLaunch and RequestHandover
     are open to any caller on
     the session bus. Every other method requires the caller to be the Tidemark
     process launched by this adapter (D-Bus peer PID check).
@@ -30,6 +30,8 @@
     <property name="Capabilities" type="as" access="read"/>
     <!-- none | starting | running | blocked | failed; see gnome-extension/README.md -->
     <property name="ClientState" type="s" access="read"/>
+    <!-- Monitor used by Place(island). Additive version-1 property. -->
+    <property name="PrimaryMonitor" type="u" access="read"/>
 
     <method name="RequestLaunch">
       <arg name="args" type="as" direction="in"/>
@@ -81,6 +83,9 @@
 
     <signal name="FocusChanged">
       <arg name="focus" type="a{sv}"/>
+    </signal>
+    <signal name="PrimaryMonitorChanged">
+      <arg name="monitor" type="u"/>
     </signal>
     <signal name="FullscreenChanged">
       <arg name="monitor" type="u"/>

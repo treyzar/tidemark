@@ -40,6 +40,7 @@ export class Adapter {
         this._lastExternal = null;
         this._focusKey = undefined;
         this._fullscreen = [];
+        this._primaryMonitor = 0;
         this._covered = false;
         this._grabs = new Map(); // accelerator action -> shortcut id
         this._opacity = new Map(); // window id -> {w, value, original}: changed by us
@@ -77,6 +78,7 @@ export class Adapter {
         this._p.forEachWindow(w => this.onWindowChanged(w));
         // Initial state, not announced (the client gets a snapshot after Hello).
         this._fullscreen = this._p.monitorsInFullscreen();
+        this._primaryMonitor = this._p.primaryMonitor().index;
         this._layout = C.normalizeLayout(this._p.currentLayout());
         this._caps = !!this._p.capsLock();
         const focus = this._p.focusWindow();
@@ -110,6 +112,10 @@ export class Adapter {
 
     get state() {
         return this._state;
+    }
+
+    get primaryMonitor() {
+        return this._primaryMonitor;
     }
 
     _setState(state) {
@@ -274,6 +280,7 @@ export class Adapter {
         const focus = this._currentFocus();
         this._focusKey = focusKey(focus);
         this._sink.emit('FocusChanged', [focus]);
+        this._sink.emit('PrimaryMonitorChanged', [this._primaryMonitor]);
         this._fullscreen.forEach((on, i) => {
             if (on)
                 this._sink.emit('FullscreenChanged', [i, true]);
@@ -347,6 +354,11 @@ export class Adapter {
     }
 
     onMonitorsChanged() {
+        const primary = this._p.primaryMonitor().index;
+        if (primary !== this._primaryMonitor) {
+            this._primaryMonitor = primary;
+            this._sink.emit('PrimaryMonitorChanged', [primary]);
+        }
         this._applyIsland();
         this.onFullscreenChanged();
         this._updateCovered();

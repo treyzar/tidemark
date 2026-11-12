@@ -113,6 +113,7 @@ export const METHOD_CAPABILITY = {
 // D-Bus signal name -> [serde tag of ShellSignal, D-Bus signature].
 export const SIGNALS = {
     FocusChanged: ['focus_changed', '(a{sv})'],
+    PrimaryMonitorChanged: ['primary_monitor_changed', '(u)'],
     FullscreenChanged: ['fullscreen_changed', '(ub)'],
     MaximizedTopChanged: ['maximized_top_changed', '(b)'],
     ShortcutActivated: ['shortcut_activated', '(s)'],

@@ -54,6 +54,7 @@ test('contract version matches Rust', () => {
     assert.match(xml, /<property name="Version" type="u" access="read"\/>/);
     assert.match(xml, /<property name="Capabilities" type="as" access="read"\/>/);
     assert.match(xml, /<property name="ClientState" type="s" access="read"\/>/);
+    assert.match(xml, /<property name="PrimaryMonitor" type="u" access="read"\/>/);
     assert.deepEqual(C.CLIENT_STATES, ['none', 'starting', 'running', 'blocked', 'failed']);
 });
 

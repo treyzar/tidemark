@@ -158,6 +158,8 @@ pub struct ClipboardData {
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum ShellSignal {
     FocusChanged { focus: Option<FocusInfo> },
+    /// The monitor used for island placement; compare fullscreen events with this index.
+    PrimaryMonitorChanged { monitor: u32 },
     FullscreenChanged { monitor: u32, fullscreen: bool },
     MaximizedTopChanged { covered: bool },
     ShortcutActivated { id: ShortcutId },
@@ -271,6 +273,10 @@ mod tests {
             json!({"signal": "fullscreen_changed", "monitor": 1, "fullscreen": true})
         );
         assert_eq!(
+            to_value(ShellSignal::PrimaryMonitorChanged { monitor: 1 }).unwrap(),
+            json!({"signal": "primary_monitor_changed", "monitor": 1})
+        );
+        assert_eq!(
             to_value(ShellSignal::ShortcutActivated { id: ShortcutId::Launcher }).unwrap(),
             json!({"signal": "shortcut_activated", "id": "launcher"})
         );
@@ -298,6 +304,7 @@ mod tests {
         let all = vec![
             ShellSignal::FocusChanged { focus: Some(focus) },
             ShellSignal::FocusChanged { focus: None },
+            ShellSignal::PrimaryMonitorChanged { monitor: 1 },
             ShellSignal::FullscreenChanged { monitor: 0, fullscreen: false },
             ShellSignal::MaximizedTopChanged { covered: true },
             ShellSignal::ShortcutActivated { id: ShortcutId::LikeTrack },

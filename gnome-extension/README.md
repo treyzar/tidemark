@@ -12,7 +12,7 @@ It does only the things Mutter does not let a Wayland client do:
 
 It exposes these as the D-Bus interface `org.tidemark.Shell1` (bus name `org.tidemark.Shell`, path `/org/tidemark/Shell`) to the Tidemark process it launched itself. Product logic and UI live in the Rust app (`apps/linux`, GTK application id `io.github.treyzar.Tidemark`, binary `/usr/bin/tidemark`).
 
-**Status: version 1 slice, never run inside GNOME by the authors yet.** The mock and contract tests below pass, but none of this is verified on a real desktop until the acceptance steps at the end have been run on Ubuntu 24.04 and 26.04.
+**Status: development version with real headless GNOME coverage.** The isolated integration harness has passed on Ubuntu 24.04 (Mutter 46) and 26.04 (Mutter 50), including authenticated launch, placement, clipboard, window actions, shortcuts and crash recovery. Physical desktop acceptance below is still required; headless checks do not prove multi-monitor input routing or the real browser integration.
 
 ## Files
 
@@ -57,6 +57,7 @@ It exposes these as the D-Bus interface `org.tidemark.Shell1` (bus name `org.tid
   - An empty `a{sv}` means none.
   - `pid` and `icon` are left out when unknown.
   - Moving a window does not re-send `FocusChanged`; a title or state change does.
+- **Primary monitor:** the open `PrimaryMonitor` property and unicast `PrimaryMonitorChanged(monitor)` identify the monitor used for island placement. The snapshot sends this index before per-monitor fullscreen state. Monitor changes update the property and signal even when fullscreen flags do not change. Clients compare `FullscreenChanged` with this index, so a fullscreen app on another display does not hide the island. These are additive version-1 members; clients of older adapters must leave automatic fullscreen hiding unavailable if the property is absent.
 - **`WindowAction(id, action, arg)`:**
   - `arg` is `<b>` for `set_above` and `<y>` for `set_opacity`, which takes 26–255 so a window can't be made invisible. Other actions ignore `arg`.
   - The method returns the state Mutter reports afterwards.

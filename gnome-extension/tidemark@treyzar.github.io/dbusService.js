@@ -33,6 +33,7 @@ export class ShellService {
         Object.defineProperty(handler, 'Version', { get: () => C.CONTRACT_VERSION });
         Object.defineProperty(handler, 'Capabilities', { get: () => this._adapter.capabilities() });
         Object.defineProperty(handler, 'ClientState', { get: () => this._adapter.state });
+        Object.defineProperty(handler, 'PrimaryMonitor', { get: () => this._adapter.primaryMonitor });
         for (const method of ['RequestLaunch', 'RequestHandover', 'Hello', 'Place', 'GetFocus', 'WindowAction', 'GetClipboard',
             'SetClipboard', 'Screenshot', 'SetCaptureHidden', 'BindShortcuts'])
             handler[`${method}Async`] = (params, invocation) => this._dispatch(method, params, invocation);
@@ -73,6 +74,13 @@ export class ShellService {
     }
 
     emit(name, args) {
+        if (name === 'PrimaryMonitorChanged') {
+            try {
+                this._impl?.emit_property_changed('PrimaryMonitor', new GLib.Variant('u', args[0]));
+            } catch (e) {
+                this._log(`PrimaryMonitor notification failed: ${e.message}`);
+            }
+        }
         if (!this._recipient)
             return;
         const [, signature] = C.SIGNALS[name];
