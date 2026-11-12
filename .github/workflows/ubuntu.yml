@@ -35,3 +35,16 @@ jobs:
           rustc --test build.rs -o "$env:RUNNER_TEMP\resource-path-tests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:RUNNER_TEMP\resource-path-tests.exe"
+
+  mpris:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install isolated D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-mpris -> target
+      - name: Test MPRIS adapter on an isolated session bus
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked
