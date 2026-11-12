@@ -27,6 +27,7 @@ pub struct ControlView {
     above: gtk::Button,
     opacity: gtk::SpinButton,
     shown_opacity: Cell<Option<(u64, u8)>>,
+    _system: crate::ui::system::SystemView,
     target: Rc<RefCell<Option<(Peer, FocusInfo)>>>,
     pending: Rc<RefCell<Option<(u64, Peer, u64)>>>,
 }
@@ -227,6 +228,8 @@ impl ControlView {
             }
         });
         root.append(&capture);
+        let system = crate::ui::system::SystemView::build(shared.smoke);
+        root.append(&system.root);
 
         let status_card = card();
         status_card.append(&section_title("Состояние Linux-версии"));
@@ -240,7 +243,9 @@ impl ControlView {
         status_card.append(&muted(
             "Буфер: фоновая текстовая история через GNOME; ручное добавление при фокусе без него.",
         ));
-        status_card.append(&muted("Док приложений пока недоступен в этой сборке."));
+        status_card.append(&muted(
+            "Избранные приложения доступны в доке на главной странице.",
+        ));
         root.append(&status_card);
 
         let now = Instant::now();
@@ -261,6 +266,7 @@ impl ControlView {
             above,
             opacity,
             shown_opacity: Cell::new(None),
+            _system: system,
             target,
             pending,
         }

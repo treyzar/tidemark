@@ -26,6 +26,10 @@ mod shelf_state_tests;
 #[path = "services/shell.rs"]
 mod shell_protocol_tests;
 #[cfg(test)]
+#[path = "services/system_state.rs"]
+#[allow(dead_code)]
+mod system_state_tests;
+#[cfg(test)]
 #[path = "services/online.rs"]
 mod translation_state_tests;
 #[cfg(test)]

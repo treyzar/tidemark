@@ -1692,6 +1692,7 @@ dependencies = [
  "tidemark-core",
  "tidemark-mpris",
  "tidemark-net",
+ "tidemark-system",
  "tidemark-yandex",
  "zbus",
 ]
@@ -1760,6 +1761,18 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "tidemark-system"
+version = "0.1.0"
+dependencies = [
+ "async-io",
+ "futures-lite",
+ "libc",
+ "thiserror",
+ "zbus",
+ "zvariant",
 ]
 
 [[package]]

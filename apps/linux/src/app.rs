@@ -211,7 +211,7 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
     let out_dir = smoke_dir();
     let mut step = 0usize;
     let mut settings: Option<adw::PreferencesWindow> = None;
-    let mut capture_preview: Option<adw::ApplicationWindow> = None;
+    let mut capture_preview: Option<gtk::ApplicationWindow> = None;
     // Every view receives real frames before allocation checks and rendering.
     glib::timeout_add_local(Duration::from_millis(400), move || {
         let result = (|| -> Result<bool, String> {

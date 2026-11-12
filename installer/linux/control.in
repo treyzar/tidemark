@@ -5,7 +5,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Tidemark contributors <noreply@github.com>
 Homepage: https://github.com/treyzar/tidemark
-Depends: libc6 (>= 2.39), libgcc-s1, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), tesseract-ocr, tesseract-ocr-eng, tesseract-ocr-rus, xdg-desktop-portal
+Depends: libc6 (>= 2.39), libgcc-s1, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), tesseract-ocr, tesseract-ocr-eng, tesseract-ocr-rus, xdg-desktop-portal, wireplumber
 Recommends: xdg-desktop-portal-gnome
 Description: Native desktop island for Ubuntu
  Music controls, clipboard history, notes, timers and desktop tools.

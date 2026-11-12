@@ -15,12 +15,12 @@ use state::{Operation, Rect, Request, Session, Viewport};
 pub struct CaptureWindow;
 impl CaptureWindow {
     /// Building/presenting this window never captures or changes the clipboard.
-    pub fn build(app: &adw::Application, smoke: bool) -> adw::ApplicationWindow {
+    pub fn build(app: &adw::Application, smoke: bool) -> gtk::ApplicationWindow {
         build(app, smoke, None)
     }
     /// Deterministic smoke preview; all effect buttons remain disabled.
     #[allow(dead_code)]
-    pub fn preview(app: &adw::Application, image: Raster) -> adw::ApplicationWindow {
+    pub fn preview(app: &adw::Application, image: Raster) -> gtk::ApplicationWindow {
         build(app, true, Some(image))
     }
 }
@@ -38,7 +38,7 @@ enum Action {
     ClearSelection,
 }
 struct Editor {
-    window: glib::WeakRef<adw::ApplicationWindow>,
+    window: glib::WeakRef<gtk::ApplicationWindow>,
     picture: glib::WeakRef<gtk::Picture>,
     drawing: glib::WeakRef<gtk::DrawingArea>,
     placeholder: glib::WeakRef<gtk::Label>,
@@ -71,8 +71,8 @@ enum Outcome {
     SaveCanceled,
 }
 type Work = Result<Outcome, String>;
-fn build(app: &adw::Application, smoke: bool, preview: Option<Raster>) -> adw::ApplicationWindow {
-    let window = adw::ApplicationWindow::builder()
+fn build(app: &adw::Application, smoke: bool, preview: Option<Raster>) -> gtk::ApplicationWindow {
+    let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Tidemark — снимок экрана")
         .default_width(900)
@@ -82,7 +82,7 @@ fn build(app: &adw::Application, smoke: bool, preview: Option<Raster>) -> adw::A
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("Снимок экрана", "Tidemark")));
-    root.append(&header);
+    window.set_titlebar(Some(&header));
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_top(12);
     body.set_margin_bottom(12);
@@ -159,7 +159,7 @@ fn build(app: &adw::Application, smoke: bool, preview: Option<Raster>) -> adw::A
     result_box.set_visible(false);
     body.append(&result_box);
     root.append(&body);
-    window.set_content(Some(&root));
+    window.set_child(Some(&root));
     let editor = Rc::new(Editor {
         window: window.downgrade(),
         picture: picture.downgrade(),
@@ -183,7 +183,7 @@ fn build(app: &adw::Application, smoke: bool, preview: Option<Raster>) -> adw::A
         (
             Action::Capture,
             "Новый снимок",
-            "Системный диалог снимка экрана; окно редактора временно скрывается",
+            "Системный диалог снимка экрана. Системная копия остаётся на диске даже при закрытии редактора",
         ),
         (
             Action::Save,

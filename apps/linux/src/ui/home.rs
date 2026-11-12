@@ -15,15 +15,22 @@ use online::{Latest, Request, TrackKey, WeatherSchedule};
 
 use gtk::glib;
 use gtk::prelude::*;
+use tidemark_core::shell::FocusInfo;
 use tidemark_mpris::TrackSnapshot;
 
 use crate::model;
 use crate::services::music::{MusicCommand, MusicEvent};
 use crate::ui::{card, muted, page_header, section_title, Shared};
 
+type Navigate = Rc<RefCell<Option<Box<dyn Fn(&str)>>>>;
+
 pub struct HomeView {
     pub root: gtk::Box,
     shared: Shared,
+    music_card: gtk::Box,
+    window_context: RefCell<Option<FocusInfo>>,
+    window_available: Cell<bool>,
+    navigate: Navigate,
     snapshot: RefCell<Option<TrackSnapshot>>,
     online: Rc<RefCell<OnlineHome>>,
     lyrics_button: gtk::Button,
@@ -130,6 +137,13 @@ impl HomeView {
             });
         }
         transport.append(&open_player);
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.set_tooltip_text(Some("Обновить музыку"));
+        {
+            let service = shared.music.clone();
+            refresh.connect_clicked(move |_| service.send(MusicCommand::Refresh));
+        }
+        transport.append(&refresh);
         music.append(&transport);
 
         let favorite_service = Rc::new(RefCell::new(if shared.smoke {
@@ -217,13 +231,6 @@ impl HomeView {
         status.set_visible(false);
         music.append(&status);
 
-        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-        refresh.set_tooltip_text(Some("Обновить музыку"));
-        {
-            let service = shared.music.clone();
-            refresh.connect_clicked(move |_| service.send(MusicCommand::Refresh));
-        }
-
         let online = Rc::new(RefCell::new(OnlineHome::default()));
         let lyrics_button = gtk::Button::with_label("Текст песни");
         lyrics_button.set_sensitive(false);
@@ -251,13 +258,12 @@ impl HomeView {
         let quick_actions = gtk::FlowBox::new();
         quick_actions.set_selection_mode(gtk::SelectionMode::None);
         quick_actions.set_min_children_per_line(1);
-        quick_actions.set_max_children_per_line(4);
+        quick_actions.set_max_children_per_line(3);
         quick_actions.set_column_spacing(6);
         quick_actions.set_row_spacing(6);
         quick_actions.insert(&favorite_button, -1);
         quick_actions.insert(&lyrics_button, -1);
         quick_actions.insert(&sleep_button, -1);
-        quick_actions.insert(&refresh, -1);
         music.append(&quick_actions);
         music.append(&favorite_status);
         music.append(&lyrics_status);
@@ -293,6 +299,10 @@ impl HomeView {
         let view = Self {
             root,
             shared,
+            music_card: music,
+            window_context: RefCell::new(None),
+            window_available: Cell::new(false),
+            navigate: Rc::new(RefCell::new(None)),
             snapshot: RefCell::new(None),
             online,
             lyrics_button,
@@ -324,6 +334,21 @@ impl HomeView {
         view.refresh_tiles();
         view.tick_online();
         view
+    }
+
+    pub fn connect_navigate(&self, callback: impl Fn(&str) + 'static) {
+        self.navigate.replace(Some(Box::new(callback)));
+    }
+
+    pub fn set_window_context(&self, focus: Option<FocusInfo>, available: bool) {
+        let changed = self.window_available.get() != available
+            || self.window_context.borrow().as_ref() != focus.as_ref();
+        self.window_available.set(available);
+        self.window_context
+            .replace(if available { focus } else { None });
+        if changed && self.root.is_mapped() {
+            self.refresh_tiles();
+        }
     }
 
     pub fn handle_event(&self, event: &MusicEvent) {
@@ -715,6 +740,14 @@ impl HomeView {
     }
 
     pub fn refresh_tiles(&self) {
+        self.music_card.set_visible(
+            self.shared
+                .config
+                .borrow()
+                .home_tiles
+                .iter()
+                .any(|id| id == "media"),
+        );
         while let Some(child) = self.tiles.first_child() {
             self.tiles.remove(&child);
         }
@@ -723,15 +756,11 @@ impl HomeView {
         grid.set_column_spacing(8);
         grid.set_row_spacing(8);
         grid.set_column_homogeneous(true);
-        for (index, id) in ids.iter().enumerate() {
+        for (index, id) in ids.iter().filter(|id| id.as_str() != "media").enumerate() {
             let tile = self.tile(id);
             grid.attach(&tile, (index % 2) as i32, (index / 2) as i32, 1, 1);
         }
         self.tiles.append(&grid);
-        self.tiles.append(&muted(
-            "Музыка, буфер и онлайн-погода доступны сейчас. Действия с окнами, захват экрана \
-             и док пока недоступны в этой сборке.",
-        ));
     }
 
     fn tile(&self, id: &str) -> gtk::Box {
@@ -753,42 +782,103 @@ impl HomeView {
         }
 
         let value = match id {
-            "media" => self
-                .snapshot
-                .borrow()
-                .as_ref()
-                .map(|snapshot| short(&snapshot.title, 30))
-                .filter(|title| !title.is_empty())
-                .unwrap_or_else(|| "Нет трека".into()),
             "clipboard" => format!("{} в истории", self.shared.clip.borrow().items.len()),
-            "window" => "Нет доступа".into(),
-            "tools" => "Недоступно".into(),
+            "window" => {
+                if !self.window_available.get() {
+                    "GNOME не подключён".into()
+                } else {
+                    self.window_context
+                        .borrow()
+                        .as_ref()
+                        .map(|focus| {
+                            if focus.title.trim().is_empty() {
+                                focus.app_id.clone()
+                            } else {
+                                focus.title.clone()
+                            }
+                        })
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| "Окно не выбрано".into())
+                }
+            }
+            "tools" => "Снимок · OCR / QR".into(),
             "weather" => self.online.borrow().weather_value.clone(),
-            "apps" => "Недоступно".into(),
             _ => String::new(),
         };
         let value_label = gtk::Label::new(Some(&value));
         value_label.set_xalign(0.0);
         value_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         value_label.add_css_class("tile-value");
+        if id == "window" {
+            value_label.set_tooltip_text(Some(&value));
+        }
         tile.append(&value_label);
 
-        let description = match id {
-            "window" => "Действия с активным окном пока не подключены.",
-            "tools" => "Захват экрана, OCR и QR пока недоступны в этой сборке.",
-            "weather" => "Open-Meteo; при недоступности — wttr.in.",
-            "apps" => "Док приложений пока недоступен в этой сборке.",
-            _ => description,
-        };
-        let detail = if id == "weather" {
-            self.online.borrow().weather_detail.clone()
-        } else {
-            description.to_owned()
+        let detail = match id {
+            "window" if !self.window_available.get() => {
+                "Подключите расширение GNOME, чтобы видеть активное окно".into()
+            }
+            "window" => self
+                .window_context
+                .borrow()
+                .as_ref()
+                .map(|focus| {
+                    let desktop_id = if focus.app_id.ends_with(".desktop") {
+                        focus.app_id.clone()
+                    } else {
+                        format!("{}.desktop", focus.app_id)
+                    };
+                    gtk::gio::DesktopAppInfo::new(&desktop_id)
+                        .map(|app| app.display_name().to_string())
+                        .unwrap_or_else(|| focus.app_id.clone())
+                })
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Выберите окно приложения для управления".into()),
+            "tools" => "Захват экрана, обрезка, распознавание текста и QR".into(),
+            "weather" => self.online.borrow().weather_detail.clone(),
+            _ => description.to_owned(),
         };
         let description = muted(&detail);
         description.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         description.set_max_width_chars(1);
         tile.append(&description);
+        if let Some((label, target)) = match id {
+            "window" => Some(("Управление окном", "control")),
+            "clipboard" => Some(("Открыть историю", "clipboard")),
+            _ => None,
+        } {
+            let button = gtk::Button::with_label(label);
+            let navigate = self.navigate.clone();
+            let smoke = self.shared.smoke;
+            button.set_sensitive(!smoke);
+            button.connect_clicked(move |_| {
+                if !smoke {
+                    if let Some(navigate) = navigate.borrow().as_ref() {
+                        navigate(target);
+                    }
+                }
+            });
+            tile.append(&button);
+        }
+        if id == "tools" {
+            let button = gtk::Button::with_label("Открыть редактор");
+            let status = description.clone();
+            let smoke = self.shared.smoke;
+            button.set_sensitive(!smoke);
+            button.connect_clicked(move |_| {
+                if smoke {
+                    return;
+                }
+                if let Some(app) = gtk::gio::Application::default()
+                    .and_then(|app| app.downcast::<adw::Application>().ok())
+                {
+                    crate::ui::capture::CaptureWindow::build(&app, false).present();
+                } else {
+                    status.set_text("Не удалось открыть редактор снимков");
+                }
+            });
+            tile.append(&button);
+        }
         if id == "weather" {
             let refresh = gtk::Button::with_label("Обновить погоду");
             let state = self.online.borrow();
@@ -838,17 +928,6 @@ fn shake_handles(
         service.send(MusicCommand::SetVolume(value));
         glib::Propagation::Stop
     });
-}
-
-fn short(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        format!(
-            "{}…",
-            text.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
-    }
 }
 
 type WeatherResult = tidemark_net::Result<Option<tidemark_net::weather::Weather>>;

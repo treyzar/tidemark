@@ -263,6 +263,13 @@ impl Island {
     }
 
     fn wire(&self) {
+        let weak = self.weak();
+        self.home.connect_navigate(move |tab| {
+            if let Some(island) = weak.upgrade() {
+                island.expand();
+                island.show_tab(tab);
+            }
+        });
         let shelf_drop = self.shelf.drop_target();
         let weak = self.weak();
         shelf_drop.connect_enter(move |_, _, _| {
@@ -779,6 +786,12 @@ impl Island {
                 self.shared.shell_peer.replace(Some(peer));
                 self.shared.shell_caps.replace(caps.clone());
                 self.shell_caps.replace(caps);
+                self.home.set_window_context(
+                    self.focus.borrow().clone(),
+                    self.shell_caps
+                        .borrow()
+                        .contains(&Capability::FocusTracking),
+                );
                 self.clipboard.context_changed();
                 self.control.set_window_context(
                     self.shared.shell_peer.borrow().clone(),
@@ -815,6 +828,7 @@ impl Island {
                 self.place_shell();
             }
             ShellEvent::Disconnected(message) => {
+                self.home.set_window_context(None, false);
                 self.shell_caps.borrow_mut().clear();
                 self.shared.shell_caps.borrow_mut().clear();
                 self.shared.shell_peer.borrow_mut().take();
@@ -852,7 +866,12 @@ impl Island {
                         .iter()
                         .any(|mime| mime == "x-kde-passwordManagerHint"),
             ),
-            ShellEvent::ClipboardText(key, text) => self.clipboard.receive_text(key, text),
+            ShellEvent::ClipboardText(key, text) => {
+                self.clipboard.receive_text(key, text);
+                if self.home.root.is_mapped() {
+                    self.home.refresh_tiles();
+                }
+            }
             ShellEvent::ClipboardWritten {
                 request,
                 peer,
@@ -864,6 +883,12 @@ impl Island {
                 self.clipboard.written(request, peer, result);
             }
             ShellEvent::Focus(focus) => {
+                self.home.set_window_context(
+                    focus.clone(),
+                    self.shell_caps
+                        .borrow()
+                        .contains(&Capability::FocusTracking),
+                );
                 self.control.set_window_context(
                     self.shared.shell_peer.borrow().clone(),
                     focus.clone(),
