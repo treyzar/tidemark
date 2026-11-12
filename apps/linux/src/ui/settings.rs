@@ -29,7 +29,7 @@ pub fn build(app: &adw::Application, shared: Shared) -> adw::PreferencesWindow {
 fn appearance_page(shared: &Shared) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
     page.set_title("Внешний вид");
-    page.set_icon_name(Some("preferences-desktop-theme-symbolic"));
+    page.set_icon_name(Some("applications-graphics-symbolic"));
 
     let island = adw::PreferencesGroup::new();
     island.set_title("Остров");
@@ -202,7 +202,7 @@ fn appearance_page(shared: &Shared) -> adw::PreferencesPage {
     let tiles = adw::PreferencesGroup::new();
     tiles.set_title("Плитки главной");
     tiles.set_description(Some(
-        "Музыка и буфер работают. Остальные плитки требуют адаптера GNOME Shell.",
+        "Выберите плитки главной. Для погоды укажите город, для управления окнами подключите расширение GNOME.",
     ));
     for (id, name, description) in model::HOME_TILES {
         let row = adw::SwitchRow::new();

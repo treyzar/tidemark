@@ -32,6 +32,8 @@ pub struct HomeView {
     progress: gtk::Scale,
     volume: gtk::Scale,
     play: gtk::Button,
+    open_player: gtk::Button,
+    open_target: Rc<RefCell<Option<tidemark_mpris::MprisPlayerId>>>,
     cover_stack: gtk::Stack,
     picture: gtk::Picture,
     textures: RefCell<VecDeque<(u64, gtk::gdk::MemoryTexture)>>,
@@ -103,6 +105,20 @@ impl HomeView {
         transport.append(&previous);
         transport.append(&play);
         transport.append(&next);
+        let open_player = gtk::Button::with_label("Плеер");
+        open_player.set_tooltip_text(Some("Открыть текущий плеер"));
+        open_player.set_sensitive(false);
+        let open_target = Rc::new(RefCell::new(None::<tidemark_mpris::MprisPlayerId>));
+        {
+            let target = open_target.clone();
+            let service = shared.music.clone();
+            open_player.connect_clicked(move |_| {
+                if let Some(player) = target.borrow().as_ref() {
+                    service.send(MusicCommand::Raise(player.clone()));
+                }
+            });
+        }
+        transport.append(&open_player);
         music.append(&transport);
 
         let volume_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -217,6 +233,8 @@ impl HomeView {
             progress,
             volume,
             play,
+            open_player,
+            open_target,
             cover_stack,
             picture,
             textures: RefCell::new(VecDeque::new()),
@@ -233,6 +251,8 @@ impl HomeView {
         match event {
             MusicEvent::Snapshot(Some(now)) => {
                 let snapshot = &now.snapshot;
+                self.open_target.replace(Some(snapshot.player.clone()));
+                self.open_player.set_sensitive(true);
                 self.title.set_text(if snapshot.title.is_empty() {
                     "Без названия"
                 } else {
@@ -269,6 +289,8 @@ impl HomeView {
                 self.tick();
             }
             MusicEvent::Snapshot(None) => {
+                self.open_target.replace(None);
+                self.open_player.set_sensitive(false);
                 self.title.set_text("Ничего не играет");
                 self.artist.set_text("Запустите музыку в MPRIS-плеере");
                 self.time.set_text("0:00");

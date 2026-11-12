@@ -32,12 +32,13 @@ async function evaluate(code) {
     return json ? JSON.parse(json) : null;
 }
 async function waitFor(read, accept, description) {
+    let value = null;
     for (let i = 0; i < 100; i++) {
-        const value = await read();
+        value = await read();
         if (accept(value)) return value;
         await sleep(100);
     }
-    throw new Error(`timeout: ${description}`);
+    throw new Error(`timeout: ${description}; last=${JSON.stringify(value)}`);
 }
 async function check(name, action) {
     try { await action(); results.push(`PASS ${name}`); }
@@ -53,7 +54,9 @@ const windowState = () => evaluate(`(() => {
     const r = w.get_frame_rect();
     const m = global.display.get_monitor_geometry(global.display.get_primary_monitor());
     const panel = Main.layoutManager.panelBox;
+    const platform = Main.extensionManager.lookup('tidemark@treyzar.github.io').stateObj._platform;
     return {count: windows.length, pid: w.get_pid(), x:r.x, y:r.y, w:r.width, h:r.height,
+        owned:platform.ownsWindow(w),
         above:w.is_above(), sticky:w.is_on_all_workspaces(), hidden:w.is_skip_taskbar(),
         visible:!!w.get_compositor_private()?.mapped && !w.is_hidden(),
         center:m.x + Math.floor((m.width-r.width)/2),
@@ -83,9 +86,10 @@ async function run() {
     });
     await check('one real GTK island has trusted PID and compact placement', async () => {
         const state = await waitFor(windowState, s => placed(s, 180, 36), 'compact GTK window');
-        const [pid] = await call('org.freedesktop.DBus', '/org/freedesktop/DBus',
-            'org.freedesktop.DBus', 'GetConnectionUnixProcessID', '(s)', ['io.github.treyzar.Tidemark'], '(u)');
-        assert(state.count === 1 && state.pid === pid, JSON.stringify(state));
+        // On GNOME 46 WaylandClient's inherited socket can report the Shell
+        // PID on MetaWindow. Use Mutter's own client/window ownership proof;
+        // the live Hello recipient's PID was independently checked above.
+        assert(state.count === 1 && state.owned, JSON.stringify(state));
         assert(state.above && state.sticky && state.hidden, JSON.stringify(state));
         assert(state.x === state.center && state.y === state.top, JSON.stringify(state));
     });

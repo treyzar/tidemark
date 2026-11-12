@@ -53,6 +53,19 @@ jobs:
       - name: Test MPRIS adapter on an isolated session bus
         run: dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked
 
+  yandex-accessibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install private D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-yandex -> target
+      - name: Test accessibility actions with synthetic browser fixtures
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-yandex/Cargo.toml --locked
+
   artwork:
     strategy:
       matrix:

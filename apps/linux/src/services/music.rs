@@ -36,6 +36,7 @@ pub enum MusicEvent {
 #[derive(Debug, Clone)]
 pub enum MusicCommand {
     Refresh,
+    Raise(MprisPlayerId),
     PlayPause,
     Next,
     Previous,
@@ -66,10 +67,17 @@ impl MusicService {
 
 pub fn spawn(events: Sender<MusicEvent>) -> MusicService {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
+    let fallback = events.clone();
+    if std::thread::Builder::new()
         .name("tidemark-mpris".into())
         .spawn(move || worker(rx, events))
-        .expect("starting the MPRIS worker");
+        .is_err()
+    {
+        let _ = fallback.send(MusicEvent::Error(
+            "Не удалось запустить управление музыкой.".into(),
+        ));
+        return MusicService::inactive();
+    }
     MusicService { tx: Some(tx) }
 }
 
@@ -176,6 +184,15 @@ fn handle_command(
     last_error: &mut Option<String>,
     events: &Sender<MusicEvent>,
 ) {
+    // Local cancellation must work even after the player or session bus disappears.
+    if matches!(command, MusicCommand::CancelSleep) {
+        if let Some(timer) = sleep.as_mut() {
+            timer.cancel();
+        }
+        *sleep = None;
+        let _ = events.send(MusicEvent::SleepCancelled);
+        return;
+    }
     if matches!(command, MusicCommand::Refresh) {
         artwork.schedule.invalidate();
         refresh(client, current, last_snapshot, artwork, last_error, events);
@@ -185,6 +202,19 @@ fn handle_command(
     let Some(connection) = ensure_client(client, events) else {
         return;
     };
+    // The button captures the displayed identity; never redirect to a newly
+    // selected player while this command waits in the worker queue.
+    if let MusicCommand::Raise(player) = &command {
+        match connection.raise(player) {
+            Ok(()) => *last_error = None,
+            Err(error) => emit_error(
+                events,
+                last_error,
+                format!("Не удалось открыть плеер: {error}"),
+            ),
+        }
+        return;
+    }
     let Some(player) = current.clone() else {
         emit_error(
             events,
@@ -196,6 +226,7 @@ fn handle_command(
 
     let result = match command {
         MusicCommand::Refresh => unreachable!("handled before borrowing the client"),
+        MusicCommand::Raise(_) => unreachable!("handled with the captured player identity"),
         MusicCommand::PlayPause => connection.play_pause(&player),
         MusicCommand::Next => connection.next(&player),
         MusicCommand::Previous => connection.previous(&player),
@@ -225,7 +256,9 @@ fn handle_command(
             let target = duration.mul_f64(fraction.clamp(0.0, 1.0));
             connection.seek(&player, track_id, target)
         }
-        MusicCommand::SetVolume(volume) => connection.player_volume(&player, volume),
+        MusicCommand::SetVolume(volume) => {
+            connection.player_volume(&player, volume.clamp(0.0, 1.0))
+        }
         MusicCommand::Sleep(minutes) => {
             if let Some(previous) = sleep.as_mut() {
                 previous.cancel();
@@ -237,14 +270,7 @@ fn handle_command(
             let _ = events.send(MusicEvent::SleepArmed(minutes));
             return;
         }
-        MusicCommand::CancelSleep => {
-            if let Some(timer) = sleep.as_mut() {
-                timer.cancel();
-            }
-            *sleep = None;
-            let _ = events.send(MusicEvent::SleepCancelled);
-            return;
-        }
+        MusicCommand::CancelSleep => unreachable!("local cancellation handled before D-Bus"),
     };
 
     match result {
@@ -390,4 +416,40 @@ fn artwork_key(snapshot: &TrackSnapshot) -> u64 {
     )
         .hash(&mut hash);
     hash.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_sleep_works_without_any_player_or_bus_connection() {
+        let (tx, rx) = mpsc::channel();
+        let mut timer = Some(SleepTimer::arm(
+            MprisPlayerId {
+                bus_name: "org.mpris.MediaPlayer2.gone".into(),
+                owner: ":1.99".into(),
+            },
+            Duration::from_secs(900),
+        ));
+        let mut client = None;
+        let mut current = None;
+        let mut snapshot = None;
+        let mut cache = ArtworkCache::default();
+        let mut error = None;
+        handle_command(
+            MusicCommand::CancelSleep,
+            &mut client,
+            &mut current,
+            &mut snapshot,
+            &mut timer,
+            &mut cache,
+            &mut error,
+            &tx,
+        );
+        assert!(timer.is_none());
+        assert!(client.is_none());
+        assert!(matches!(rx.try_recv(), Ok(MusicEvent::SleepCancelled)));
+        assert!(rx.try_recv().is_err());
+    }
 }
