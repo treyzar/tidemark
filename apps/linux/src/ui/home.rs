@@ -1,10 +1,12 @@
 //! Home tab: MPRIS, configured weather and explicitly requested online lyrics.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+#[path = "../services/yandex.rs"]
+mod favorites;
 #[path = "../services/home_online.rs"]
 mod online;
 use online::{Latest, Request, TrackKey, WeatherSchedule};
@@ -34,6 +36,12 @@ pub struct HomeView {
     play: gtk::Button,
     open_player: gtk::Button,
     open_target: Rc<RefCell<Option<tidemark_mpris::MprisPlayerId>>>,
+    favorite_service: Rc<RefCell<favorites::Service>>,
+    favorite_track: Rc<RefCell<Option<TrackSnapshot>>>,
+    favorite_key: RefCell<Option<favorites::TrackKey>>,
+    favorite_known: Rc<Cell<Option<bool>>>,
+    favorite_button: gtk::Button,
+    favorite_status: gtk::Label,
     cover_stack: gtk::Stack,
     picture: gtk::Picture,
     textures: RefCell<VecDeque<(u64, gtk::gdk::MemoryTexture)>>,
@@ -120,6 +128,50 @@ impl HomeView {
         }
         transport.append(&open_player);
         music.append(&transport);
+
+        let favorite_service = Rc::new(RefCell::new(if shared.smoke {
+            favorites::Service::inactive()
+        } else {
+            favorites::Service::new()
+        }));
+        let favorite_track = Rc::new(RefCell::new(None::<TrackSnapshot>));
+        let favorite_known = Rc::new(Cell::new(None::<bool>));
+        let favorite_button = gtk::Button::with_label("В избранное Яндекса");
+        favorite_button.set_sensitive(false);
+        favorite_button.set_tooltip_text(Some("Изменить «Мне нравится» в открытой Яндекс Музыке"));
+        let favorite_status = muted("Состояние избранного ещё не проверено");
+        favorite_status.add_css_class("tiny");
+        {
+            let service = favorite_service.clone();
+            let track = favorite_track.clone();
+            let known = favorite_known.clone();
+            let status = favorite_status.clone();
+            favorite_button.connect_clicked(move |button| {
+                let snapshot = track.borrow();
+                let Some(snapshot) = snapshot.as_ref() else {
+                    return;
+                };
+                let want = known.get() != Some(true);
+                match service.borrow_mut().start(snapshot, want) {
+                    Ok(_) => {
+                        button.set_sensitive(false);
+                        status.set_text("Проверяем трек и избранное в Яндекс Музыке…");
+                    }
+                    Err(error) => status.set_text(match error {
+                        favorites::StartError::Busy => "Предыдущая операция ещё выполняется",
+                        favorites::StartError::NoTrack | favorites::StartError::InvalidMetadata => {
+                            "Плеер не сообщает точные данные трека"
+                        }
+                        favorites::StartError::Inactive
+                        | favorites::StartError::WorkerUnavailable => {
+                            "Управление избранным сейчас недоступно"
+                        }
+                    }),
+                }
+            });
+        }
+        music.append(&favorite_button);
+        music.append(&favorite_status);
 
         let volume_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let volume_icon = gtk::Image::from_icon_name("audio-volume-medium-symbolic");
@@ -235,6 +287,12 @@ impl HomeView {
             play,
             open_player,
             open_target,
+            favorite_service,
+            favorite_track,
+            favorite_key: RefCell::new(None),
+            favorite_known,
+            favorite_button,
+            favorite_status,
             cover_stack,
             picture,
             textures: RefCell::new(VecDeque::new()),
@@ -248,6 +306,20 @@ impl HomeView {
     }
 
     pub fn handle_event(&self, event: &MusicEvent) {
+        if let MusicEvent::Snapshot(now) = event {
+            let snapshot = now.as_ref().map(|now| &now.snapshot);
+            self.favorite_service.borrow_mut().observe(snapshot);
+            let key = snapshot.and_then(favorites::capture);
+            if *self.favorite_key.borrow() != key {
+                self.favorite_known.set(None);
+                self.favorite_key.replace(key);
+                self.favorite_button.set_label("В избранное Яндекса");
+                self.favorite_status
+                    .set_text("Состояние избранного ещё не проверено");
+            }
+            self.favorite_track.replace(snapshot.cloned());
+            self.poll_favorite();
+        }
         match event {
             MusicEvent::Snapshot(Some(now)) => {
                 let snapshot = &now.snapshot;
@@ -324,6 +396,7 @@ impl HomeView {
 
     pub fn tick(&self) {
         self.tick_online();
+        self.poll_favorite();
         let snapshot = self.snapshot.borrow();
         let Some(snapshot) = snapshot.as_ref() else {
             return;
@@ -340,6 +413,39 @@ impl HomeView {
         }
         self.time
             .set_text(&model::progress_label(position, snapshot.duration));
+    }
+
+    fn poll_favorite(&self) {
+        let mut service = self.favorite_service.borrow_mut();
+        if let Some(outcome) = service.try_recv() {
+            if outcome.current {
+                match outcome.result {
+                    Ok(liked) => {
+                        self.favorite_known.set(Some(liked));
+                        self.favorite_button.set_label(if liked {
+                            "Убрать лайк в Яндексе"
+                        } else {
+                            "В избранное Яндекса"
+                        });
+                        self.favorite_status.set_text(if liked {
+                            "Добавлено в «Мне нравится» в Яндекс Музыке"
+                        } else {
+                            "Удалено из «Мне нравится» в Яндекс Музыке"
+                        });
+                    }
+                    Err(error) => {
+                        // A rejected confirmation can follow an applied remote
+                        // action; the previous confirmed state is now unknown.
+                        self.favorite_known.set(None);
+                        self.favorite_button.set_label("В избранное Яндекса");
+                        self.favorite_status.set_text(&error.to_string());
+                    }
+                }
+            }
+        }
+        self.favorite_button.set_sensitive(
+            service.available() && !service.busy() && self.favorite_key.borrow().is_some(),
+        );
     }
 
     pub fn now_playing(&self) -> Option<String> {

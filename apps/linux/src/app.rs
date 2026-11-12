@@ -190,7 +190,7 @@ fn ensure_ui(app: &adw::Application, state: &Rc<AppState>) {
         });
     }
     let (shell_tx, shell_rx) = mpsc::channel();
-    island.attach_shell(shell::spawn(shell_tx));
+    island.attach_shell(shell::spawn(shell_tx, island.launcher_enabled()));
     let weak = Rc::downgrade(&island);
     glib::timeout_add_local(Duration::from_millis(100), move || {
         let Some(island) = weak.upgrade() else {
@@ -249,6 +249,14 @@ fn schedule_smoke(_app: &adw::Application, _state: &Rc<AppState>, island: Rc<Isl
                     &out_dir.join("island-agent-card.png"),
                 )?;
                 island.agent.clear();
+                island.open_launcher();
+            } else if step == model::TABS.len() + 3 {
+                island.check_geometry(true)?;
+                if !island.launcher.root.is_visible() {
+                    return Err("launcher did not become visible".into());
+                }
+                render_png(&island.root_widget(), &out_dir.join("island-launcher.png"))?;
+                island.close_launcher(true);
                 island.collapse();
             } else {
                 island.check_geometry(false)?;

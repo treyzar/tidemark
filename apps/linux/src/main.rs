@@ -17,6 +17,10 @@ mod shell_protocol_tests;
 #[cfg(test)]
 #[path = "services/online.rs"]
 mod translation_state_tests;
+#[cfg(test)]
+#[path = "services/yandex_state.rs"]
+#[allow(dead_code)]
+mod yandex_state_tests;
 
 #[cfg(all(test, not(target_os = "linux")))]
 #[allow(dead_code)]
@@ -44,3 +48,8 @@ fn main() {
     );
     std::process::exit(1);
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "services/launcher.rs"]
+mod launcher_helper_tests;

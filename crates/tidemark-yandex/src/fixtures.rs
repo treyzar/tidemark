@@ -356,3 +356,24 @@ fn captured_registry_owner_is_checked_again_before_queries() {
     );
     assert_eq!(f.state.lock().unwrap().actions, 0);
 }
+
+#[test]
+fn cancellation_guard_blocks_the_only_mutating_call() {
+    let f = Fixture::new(State::default());
+    let mut checked = 0;
+    assert_eq!(
+        f.client.set_liked_with_guard("Song", "Artist", true, || {
+            checked += 1;
+            false
+        }),
+        Err(Error::Changed)
+    );
+    assert_eq!(checked, 1);
+    let state = f.state.lock().unwrap();
+    assert!(
+        state.title_reads > 0,
+        "guard runs after final evidence collection"
+    );
+    assert_eq!(state.actions, 0);
+    assert!(!state.liked);
+}

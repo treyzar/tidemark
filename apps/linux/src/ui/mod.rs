@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod control;
 pub mod home;
 pub mod island;
+pub mod launcher;
 pub mod notes;
 pub mod settings;
 pub mod text;
@@ -152,11 +153,11 @@ window.tidemark-window.solid-csd {{
 }}
 .tidemark-island.expanded {{ border-radius: {radius}px; }}
 .tidemark-collapsed {{ padding: 8px 14px; }}
-.tidemark-clock {{ font-weight: 700; font-size: 14px; }}
+.tidemark-clock {{ font-weight: 600; font-size: 14px; }}
 .tidemark-mini {{ color: {subtext}; font-size: 12px; }}
 .tidemark-header {{ padding: 10px 14px 4px 14px; }}
-.tidemark-title {{ font-weight: 700; font-size: 16px; }}
-.tidemark-section {{ color: {subtext}; font-weight: 700; font-size: 12px; }}
+.tidemark-title {{ font-weight: 600; font-size: 16px; }}
+.tidemark-section {{ color: {subtext}; font-weight: 500; font-size: 12px; }}
 .muted {{ color: {subtext}; font-size: 12px; }}
 .tiny {{ color: {subtext}; font-size: 11px; }}
 .accent {{ color: {accent}; }}
@@ -167,15 +168,15 @@ window.tidemark-window.solid-csd {{
     padding: 10px 12px;
 }}
 .tile:hover {{ background: {hover}; }}
-.tile-title {{ font-weight: 700; font-size: 13px; }}
-.tile-value {{ font-size: 18px; font-weight: 700; }}
+.tile-title {{ font-weight: 600; font-size: 13px; }}
+.tile-value {{ font-size: 18px; font-weight: 600; }}
 .tidemark-list {{ background: transparent; }}
 .tidemark-row {{ padding: 8px 6px; border-bottom: 1px solid {border}; }}
 .tidemark-row:hover {{ background: {tile}; }}
 .cover {{ border-radius: 10px; }}
 .tidemark-status {{ padding: 4px 14px 10px 14px; color: {subtext}; font-size: 11px; }}
 .tidemark-page {{ padding: 6px 14px 14px 14px; }}
-.tidemark-big {{ font-size: 40px; font-weight: 700; }}
+.tidemark-big {{ font-size: 40px; font-weight: 600; }}
 progressbar.tidemark {{ min-height: 4px; }}
 "#
     )
@@ -243,6 +244,7 @@ pub fn muted(text: &str) -> gtk::Label {
 pub fn icon_button(icon: &str, label: &str) -> gtk::Button {
     let button = gtk::Button::from_icon_name(icon);
     button.set_tooltip_text(Some(label));
+    button.set_cursor_from_name(Some("pointer"));
     button.set_accessible_role(gtk::AccessibleRole::Button);
     button.update_property(&[gtk::accessible::Property::Label(label)]);
     button
@@ -250,6 +252,7 @@ pub fn icon_button(icon: &str, label: &str) -> gtk::Button {
 
 pub fn text_button(label: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
+    button.set_cursor_from_name(Some("pointer"));
     button.set_accessible_role(gtk::AccessibleRole::Button);
     button
 }
@@ -260,4 +263,37 @@ pub fn scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     scrolled.set_child(Some(child));
     scrolled.set_vexpand(true);
     scrolled
+}
+
+/// Cover native Adwaita internals and controls created after the first map,
+/// while preserving text-entry I-beams and other input-specific cursors.
+pub fn install_hand_cursors(root: &impl IsA<gtk::Widget>) {
+    let root = root.as_ref();
+    apply_hand_cursors(root);
+    root.connect_map(|root| apply_hand_cursors(root));
+    let weak = root.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        let Some(root) = weak.upgrade() else {
+            return gtk::glib::ControlFlow::Break;
+        };
+        if root.is_visible() {
+            apply_hand_cursors(&root);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+fn apply_hand_cursors(widget: &gtk::Widget) {
+    let clickable = widget.is::<gtk::Button>()
+        || widget.is::<gtk::Switch>()
+        || widget.is::<gtk::DropDown>()
+        || widget.is::<gtk::MenuButton>()
+        || widget.css_name().as_str() == "button";
+    if clickable && widget.cursor().and_then(|cursor| cursor.name()).as_deref() != Some("pointer") {
+        widget.set_cursor_from_name(Some("pointer"));
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        apply_hand_cursors(&widget);
+    }
 }

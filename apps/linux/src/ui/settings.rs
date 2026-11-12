@@ -23,6 +23,7 @@ pub fn build(app: &adw::Application, shared: Shared) -> adw::PreferencesWindow {
     window.add(&appearance_page(&shared));
     window.add(&behaviour_page(&shared));
     window.add(&system_page(&shared));
+    crate::ui::install_hand_cursors(&window);
     window
 }
 
@@ -440,8 +441,8 @@ fn behaviour_switches() -> [SwitchSpec; 9] {
             |config, value| config.privacy_indicator = value,
         ),
         (
-            "Поиск по Alt+Space",
-            "Глобальные сочетания регистрирует адаптер.",
+            "Поиск по Super+Alt+Space",
+            "Приложения, файлы, калькулятор и поиск в браузере; сочетание регистрирует GNOME.",
             |config| config.launcher,
             |config, value| config.launcher = value,
         ),

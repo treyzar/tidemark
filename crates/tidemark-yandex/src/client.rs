@@ -145,6 +145,17 @@ impl Client {
     /// state checks. Never retries the mutating action on another candidate.
     /// Ok means the observed accessibility state was confirmed after the action.
     pub fn set_liked(&self, title: &str, artist: &str, want: bool) -> Result<bool> {
+        self.set_liked_with_guard(title, artist, want, || true)
+    }
+    /// Re-check cancellation after the final evidence/owner checks, immediately
+    /// before the sole mutating call. A false guard never invokes DoAction.
+    pub fn set_liked_with_guard(
+        &self,
+        title: &str,
+        artist: &str,
+        want: bool,
+        mut guard: impl FnMut() -> bool,
+    ) -> Result<bool> {
         if normalized(title).is_empty() || artist_name(artist).is_empty() {
             return Err(Error::Track);
         }
@@ -169,6 +180,10 @@ impl Client {
             }
             self.verify_owner(&second.button.owner, &mut b)?;
             let action = self.proxy(&second.button, ACTION, &mut b)?;
+            if !guard() {
+                return Err(Error::Changed);
+            }
+            b.check()?;
             let applied: bool = action
                 .call("DoAction", &(0i32,))
                 .map_err(|_| Error::Action)?;

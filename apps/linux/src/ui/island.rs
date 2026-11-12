@@ -34,6 +34,11 @@ pub struct Island {
     pub agent: crate::ui::agent::AgentView,
     agent_previous: Cell<Option<(bool, bool)>>,
     pub switcher: gtk::StackSwitcher,
+    pub launcher: crate::ui::launcher::LauncherView,
+    content: gtk::Stack,
+    search_button: gtk::Button,
+    launcher_previous: Cell<Option<(bool, bool)>>,
+    last_launcher_enabled: Cell<Option<bool>>,
     settings_button: gtk::Button,
     revealer: gtk::Revealer,
     root: gtk::Box,
@@ -110,7 +115,12 @@ impl Island {
         let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
         settings_button.set_tooltip_text(Some("Настройки"));
         settings_button.update_property(&[gtk::accessible::Property::Label("Настройки")]);
+        let search_button = gtk::Button::from_icon_name("system-search-symbolic");
+        search_button.set_tooltip_text(Some("Поиск · Super+Alt+Space"));
+        search_button.update_property(&[gtk::accessible::Property::Label("Поиск")]);
+        search_button.set_visible(shared.config.borrow().launcher);
         header.append(&switcher);
+        header.append(&search_button);
         header.append(&settings_button);
 
         let home = HomeView::build(shared.clone());
@@ -143,7 +153,26 @@ impl Island {
         expanded.append(&header);
         let agent = crate::ui::agent::AgentView::build(shared.smoke);
         expanded.append(&agent.root);
-        expanded.append(&stack);
+        let launcher = crate::ui::launcher::LauncherView::build(shared.clone());
+        let content = gtk::Stack::new();
+        content.set_hhomogeneous(false);
+        content.set_vhomogeneous(false);
+        content.set_vexpand(true);
+        content.add_named(&stack, Some("tabs"));
+        content.add_named(&launcher.root, Some("launcher"));
+        content.set_visible_child_name("tabs");
+        // The card above must retain its complete text/buttons. A Stack's
+        // visible page can otherwise contribute its minimum height to the
+        // parent even when its inner page is scrollable, pushing the window
+        // beyond 620px. This outer viewport makes the body explicitly shrink
+        // and scroll within the space left below a card.
+        let body = gtk::ScrolledWindow::new();
+        body.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        body.set_min_content_height(0);
+        body.set_propagate_natural_height(false);
+        body.set_vexpand(true);
+        body.set_child(Some(&content));
+        expanded.append(&body);
 
         let status = gtk::Label::new(Some(&shell_status()));
         status.set_xalign(0.0);
@@ -185,6 +214,11 @@ impl Island {
             agent,
             agent_previous: Cell::new(None),
             switcher,
+            launcher,
+            content,
+            search_button,
+            launcher_previous: Cell::new(None),
+            last_launcher_enabled: Cell::new(None),
             settings_button,
             revealer,
             root,
@@ -213,10 +247,36 @@ impl Island {
         });
         island.me.replace(Some(Rc::downgrade(&island)));
         island.wire();
+        crate::ui::install_hand_cursors(&island.window);
         island
     }
 
     fn wire(&self) {
+        let weak = self.weak();
+        self.search_button.connect_clicked(move |_| {
+            if let Some(island) = weak.upgrade() {
+                if island.launcher_visible() {
+                    island.close_launcher(false);
+                } else {
+                    island.open_launcher();
+                }
+            }
+        });
+        let weak = self.weak();
+        self.launcher.connect_dismiss(move || {
+            if let Some(island) = weak.upgrade() {
+                island.close_launcher(false);
+            }
+        });
+        let tabs = gtk::GestureClick::new();
+        tabs.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = self.weak();
+        tabs.connect_pressed(move |_, _, _, _| {
+            if let Some(island) = weak.upgrade() {
+                island.close_launcher(false);
+            }
+        });
+        self.switcher.add_controller(tabs);
         let weak = self.weak();
         self.restart.connect_clicked(move |_| {
             if let Some(island) = weak.upgrade() {
@@ -279,7 +339,9 @@ impl Island {
             keys.connect_key_pressed(move |_, key, _, _| {
                 if key == gtk::gdk::Key::Escape {
                     if let Some(island) = weak.upgrade() {
-                        if island.agent.dismiss() {
+                        if island.launcher_visible() {
+                            island.close_launcher(false);
+                        } else if island.agent.dismiss() {
                             island.pump_agent();
                         } else {
                             island.pinned.set(false);
@@ -361,6 +423,11 @@ impl Island {
     }
 
     pub fn collapse(&self) {
+        // Any route to compact mode closes search without recursively restoring
+        // the geometry captured when search opened.
+        self.content.set_visible_child_name("tabs");
+        self.launcher_previous.set(None);
+        self.search_button.set_icon_name("system-search-symbolic");
         self.cancel_hover();
         if !self.revealer.reveals_child() {
             return;
@@ -513,8 +580,75 @@ impl Island {
         Ok(())
     }
 
+    pub fn launcher_enabled(&self) -> bool {
+        self.shared.config.borrow().launcher
+    }
+    fn launcher_visible(&self) -> bool {
+        self.content.visible_child_name().as_deref() == Some("launcher")
+    }
+    pub fn open_launcher(&self) {
+        if !self.launcher_enabled() || self.launcher_visible() {
+            return;
+        }
+        if self.agent.root.is_visible() {
+            self.status
+                .set_text("Сначала ответьте на карточку агента или закройте её без ответа.");
+            return;
+        }
+        self.launcher_previous
+            .set(Some((self.revealer.reveals_child(), self.pinned.get())));
+        self.pinned.set(true);
+        self.expand();
+        self.content.set_visible_child_name("launcher");
+        self.search_button.set_icon_name("go-previous-symbolic");
+        self.search_button
+            .set_tooltip_text(Some("Назад к вкладкам"));
+        // An explicit search action should receive keyboard input. Fullscreen
+        // restoration deliberately uses only set_visible elsewhere.
+        self.window.present();
+        let weak = self.weak();
+        glib::idle_add_local_once(move || {
+            if let Some(island) = weak.upgrade() {
+                if island.launcher_visible() {
+                    island.launcher.focus_entry();
+                }
+            }
+        });
+    }
+    pub fn close_launcher(&self, collapse: bool) {
+        if !self.launcher_visible() {
+            return;
+        }
+        self.content.set_visible_child_name("tabs");
+        self.search_button.set_icon_name("system-search-symbolic");
+        self.search_button
+            .set_tooltip_text(Some("Поиск · Super+Alt+Space"));
+        if let Some((was_expanded, pinned)) = self.launcher_previous.take() {
+            self.pinned.set(pinned);
+            if collapse || !was_expanded {
+                self.pinned.set(false);
+                self.collapse();
+            }
+        }
+    }
+    fn sync_launcher_setting(&self) {
+        let enabled = self.launcher_enabled();
+        self.search_button.set_visible(enabled);
+        if !enabled {
+            self.close_launcher(false);
+        }
+        if self.last_launcher_enabled.get() != Some(enabled)
+            && self.shell.borrow().send(ShellCommand::Shortcuts(enabled))
+        {
+            self.last_launcher_enabled.set(Some(enabled));
+        }
+    }
+
     pub fn pump_agent(&self) {
         if self.agent.refresh() {
+            if self.launcher_visible() {
+                self.close_launcher(false);
+            }
             if self.agent_previous.get().is_none() {
                 self.agent_previous
                     .set(Some((self.revealer.reveals_child(), self.pinned.get())));
@@ -582,6 +716,8 @@ impl Island {
             ShellEvent::Connected(caps) => {
                 self.shell_caps.replace(caps);
                 self.last_placement.set(None);
+                self.last_launcher_enabled.set(None);
+                self.sync_launcher_setting();
                 self.restart.set_visible(false);
                 let implemented = [
                     Capability::PlaceWindows,
@@ -646,12 +782,12 @@ impl Island {
                 self.apply_fullscreen();
             }
             ShellEvent::Shortcut(ShortcutId::Launcher) => {
-                if self.revealer.reveals_child() {
-                    self.pinned.set(false);
-                    self.collapse();
-                } else {
-                    self.pinned.set(true);
-                    self.expand();
+                if self.launcher_enabled() {
+                    if self.launcher_visible() {
+                        self.close_launcher(true);
+                    } else {
+                        self.open_launcher();
+                    }
                 }
             }
             ShellEvent::Shortcut(ShortcutId::ToggleTheme) => {
@@ -778,6 +914,7 @@ impl Island {
     }
 
     pub fn show_tab(&self, id: &str) {
+        self.close_launcher(false);
         self.stack.set_visible_child_name(id);
         self.refresh_current();
     }
@@ -793,6 +930,7 @@ impl Island {
     }
 
     pub fn tick(&self) {
+        self.sync_launcher_setting();
         self.update_input_region();
         self.apply_fullscreen();
         self.place_shell();

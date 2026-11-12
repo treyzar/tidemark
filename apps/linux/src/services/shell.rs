@@ -102,6 +102,7 @@ pub enum Event {
 pub enum Command {
     Place(Rect),
     Handover,
+    Shortcuts(bool),
 }
 
 #[derive(Clone, Default)]
@@ -114,7 +115,7 @@ impl Service {
     }
 }
 
-pub fn spawn(events: Sender<Event>) -> Service {
+pub fn spawn(events: Sender<Event>, mut launcher_enabled: bool) -> Service {
     let (tx, rx) = mpsc::sync_channel(16);
     let worker_events = events.clone();
     let result = std::thread::Builder::new()
@@ -123,7 +124,7 @@ pub fn spawn(events: Sender<Event>) -> Service {
             let events = worker_events;
             async_io::block_on(async move {
                 loop {
-                    if let Err(error) = session(&events, &rx).await {
+                    if let Err(error) = session(&events, &rx, &mut launcher_enabled).await {
                         if events.send(Event::Disconnected(error.to_string())).is_err() {
                             return;
                         }
@@ -148,7 +149,11 @@ pub fn spawn(events: Sender<Event>) -> Service {
     }
 }
 
-async fn session(events: &Sender<Event>, commands: &Receiver<Command>) -> zbus::Result<()> {
+async fn session(
+    events: &Sender<Event>,
+    commands: &Receiver<Command>,
+    launcher_enabled: &mut bool,
+) -> zbus::Result<()> {
     let connect = async {
         zbus::connection::Builder::session()?
             .method_timeout(CALL_TIMEOUT)
@@ -195,7 +200,7 @@ async fn session(events: &Sender<Event>, commands: &Receiver<Command>) -> zbus::
     let mut state_check = std::time::Instant::now();
     let mut previous_state = String::new();
     if !owner.is_empty() {
-        authenticated = authenticate(&connection, &owner, events).await;
+        authenticated = authenticate(&connection, &owner, events, *launcher_enabled).await;
     } else {
         let _ = events.send(Event::Disconnected("Адаптер GNOME не найден".into()));
     }
@@ -226,7 +231,8 @@ async fn session(events: &Sender<Event>, commands: &Receiver<Command>) -> zbus::
                     let _ =
                         events.send(Event::Disconnected("Адаптер GNOME переподключается".into()));
                     if !owner.is_empty() {
-                        authenticated = authenticate(&connection, &owner, events).await;
+                        authenticated =
+                            authenticate(&connection, &owner, events, *launcher_enabled).await;
                         if authenticated {
                             if let Some(rect) = latest_place {
                                 place(&connection, &owner, rect, events).await;
@@ -265,6 +271,14 @@ async fn session(events: &Sender<Event>, commands: &Receiver<Command>) -> zbus::
         }
         loop {
             match commands.try_recv() {
+                Ok(Command::Shortcuts(enabled)) => {
+                    if *launcher_enabled != enabled {
+                        *launcher_enabled = enabled;
+                        if authenticated && !handover_pending {
+                            bind_shortcuts(&connection, &owner, events, enabled).await;
+                        }
+                    }
+                }
                 Ok(Command::Place(rect)) => {
                     latest_place = Some(rect);
                     if authenticated && !handover_pending {
@@ -314,7 +328,12 @@ async fn session(events: &Sender<Event>, commands: &Receiver<Command>) -> zbus::
     }
 }
 
-async fn authenticate(connection: &zbus::Connection, owner: &str, events: &Sender<Event>) -> bool {
+async fn authenticate(
+    connection: &zbus::Connection,
+    owner: &str,
+    events: &Sender<Event>,
+    launcher_enabled: bool,
+) -> bool {
     if !launched_by_adapter() {
         return false;
     }
@@ -343,22 +362,7 @@ async fn authenticate(connection: &zbus::Connection, owner: &str, events: &Sende
             let _ = events.send(Event::PrimaryMonitor(primary));
         }
         if caps.contains(&Capability::GlobalShortcuts) {
-            // Launcher currently toggles the island, not an unfinished search UI.
-            let bindings = vec![
-                ("launcher", "<Super><Alt>space"),
-                ("toggle_theme", "<Super><Alt>t"),
-            ];
-            match proxy
-                .call::<_, _, Vec<(String, bool)>>("BindShortcuts", &(bindings,))
-                .await
-            {
-                Ok(results) => {
-                    let _ = events.send(Event::Bindings(results));
-                }
-                Err(error) => {
-                    let _ = events.send(Event::Error(map_error(error)));
-                }
-            }
+            bind_shortcuts(connection, owner, events, launcher_enabled).await;
         }
         Ok::<(), zbus::Error>(())
     }
@@ -372,6 +376,39 @@ async fn authenticate(connection: &zbus::Connection, owner: &str, events: &Sende
                 let _ = events.send(Event::NeedsHandover);
             }
             false
+        }
+    }
+}
+
+fn shortcut_bindings(launcher_enabled: bool) -> Vec<(&'static str, &'static str)> {
+    let mut bindings = vec![("toggle_theme", "<Super><Alt>t")];
+    if launcher_enabled {
+        bindings.push(("launcher", "<Super><Alt>space"));
+    }
+    bindings
+}
+async fn bind_shortcuts(
+    connection: &zbus::Connection,
+    owner: &str,
+    events: &Sender<Event>,
+    launcher_enabled: bool,
+) {
+    let result = async {
+        let proxy = zbus::Proxy::new(connection, owner, OBJECT_PATH, INTERFACE).await?;
+        proxy
+            .call::<_, _, Vec<(String, bool)>>(
+                "BindShortcuts",
+                &(shortcut_bindings(launcher_enabled),),
+            )
+            .await
+    }
+    .await;
+    match result {
+        Ok(results) => {
+            let _ = events.send(Event::Bindings(results));
+        }
+        Err(error) => {
+            let _ = events.send(Event::Error(map_error(error)));
         }
     }
 }
@@ -569,6 +606,14 @@ mod tests {
                 OwnedValue::try_from(Structure::from((-10i32, 20i32, 800i32, 600i32))).unwrap(),
             ),
         ])
+    }
+    #[test]
+    fn disabled_launcher_releases_search_binding_and_preserves_theme() {
+        assert_eq!(
+            shortcut_bindings(false),
+            vec![("toggle_theme", "<Super><Alt>t")]
+        );
+        assert!(shortcut_bindings(true).contains(&("launcher", "<Super><Alt>space")));
     }
     #[test]
     fn primary_fullscreen_policy_ignores_secondary_and_unknown_mapping() {

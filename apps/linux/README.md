@@ -2,7 +2,7 @@
 
 Native Rust GTK4 application under development for Ubuntu 24.04/26.04 with GNOME. The stable release currently remains the Windows application; this package is a development checkpoint.
 
-The current source connects shared config, history, notes, reminders, timers and text tools to native views, and uses a worker for MPRIS playback. The GNOME worker now retains its authenticated connection for placement and desktop state; window actions, background clipboard and capture controls remain unavailable. The full parity checklist is in [the architecture](../../docs/ubuntu/architecture.md); capture/editor/OCR/QR/recording, actual Yandex Music likes, shelf/dock, search, weather/lyrics and system controls still need implementation and acceptance testing.
+The current source connects shared config, history, notes, reminders, timers and text tools to native views, and uses a worker for MPRIS playback. The GNOME worker now retains its authenticated connection for placement and desktop state; window actions, background clipboard and capture controls remain unavailable. The full parity checklist is in [the architecture](../../docs/ubuntu/architecture.md); capture/editor/OCR/QR/recording, actual Yandex Music likes, shelf/dock and system controls still need implementation and acceptance testing.
 
 ## Build
 
@@ -36,8 +36,8 @@ Placement follows compact/expanded size and the configured top offset. The
 additive `PrimaryMonitor` property and `PrimaryMonitorChanged` signal select
 which fullscreen events hide the island; older adapters without this mapping
 leave fullscreen hiding unavailable. Restoring uses visibility rather than
-window activation. `Super+Alt+Space` toggles the island, and `Super+Alt+T`
-changes the theme; search and Yandex likes remain unavailable. Occupied shortcut
+window activation. `Super+Alt+Space` opens and focuses search; repeating it closes search and
+collapses the island. `Super+Alt+T` changes the theme. Yandex likes remain unavailable. Occupied shortcut
 bindings are reported and never replaced.
 
 An untrusted running instance offers an explicit restart confirmation. It saves
@@ -47,6 +47,22 @@ or paused timers, an armed music sleep timer and unsaved text prevent handover
 because transferring those states is not implemented. Ordinary smoke runs never
 start this worker. The protocol is covered by portable tests; native GTK and
 real GNOME lifecycle/placement acceptance are still required for this slice.
+
+## Launcher
+
+The header search button and `Super+Alt+Space` open a native launcher in the
+existing 560×620 island. It searches installed desktop applications, existing
+absolute paths, arithmetic expressions and browser queries using the configured
+search template (Google by default). Desktop activation uses GIO rather than
+shell command strings. Escape/back returns to the previous page, restoring
+compact mode when search opened from it; repeating the global shortcut closes
+search and collapses the island. Regular tab buttons remain available.
+
+Disabling the launcher hides its button and releases only the search shortcut;
+the theme shortcut remains bound. Agent questions temporarily take priority.
+Smoke renders `island-launcher.png` with application, file, browser and clipboard
+activation disabled. Native buttons, switches and dropdowns, including controls
+created within settings, receive hand cursors while text entries retain theirs.
 
 ## Local coding-agent cards
 
