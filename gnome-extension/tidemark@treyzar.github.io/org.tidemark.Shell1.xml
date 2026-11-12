@@ -1,0 +1,123 @@
+<node>
+  <!--
+    org.tidemark.Shell1, contract version 1 (property Version).
+    Bus name org.tidemark.Shell, object path /org/tidemark/Shell.
+    Source of truth for names and payloads: crates/tidemark-core/src/shell.rs.
+    Enum strings (roles, actions, capabilities, shortcut ids) are the serde
+    snake_case wire names; a{sv} keys are the serde field names; Rect is
+    (iiii) = (x, y, w, h). Signals are sent only to the authenticated client
+    (unicast), never broadcast.
+
+    Access: Version, Capabilities, ClientState, PrimaryMonitor, RequestLaunch and RequestHandover
+    are open to any caller on
+    the session bus. Every other method requires the caller to be the Tidemark
+    process launched by this adapter (D-Bus peer PID check).
+
+    a{sv} payloads (FocusChanged, GetFocus, WindowAction): an EMPTY dict means
+    Rust None (e.g. no focused application); a non-empty dict has every
+    non-Option field, and None Option fields (pid, icon) are omitted.
+
+    Errors: org.tidemark.Shell1.Error.{AccessDenied, Unsupported, Failed,
+    InvalidArgs}. Unsupported carries exactly the capability wire name as
+    message (ShellError::Unsupported): Place place_windows, GetFocus
+    focus_tracking, WindowAction window_actions, GetClipboard clipboard_read,
+    GetClipboardBounded clipboard_read,
+    SetClipboard clipboard_write, Screenshot screenshot, SetCaptureHidden
+    capture_hiding, BindShortcuts global_shortcuts. Failed carries
+    user-facing text (ShellError::Failed).
+  -->
+  <interface name="org.tidemark.Shell1">
+    <property name="Version" type="u" access="read"/>
+    <property name="Capabilities" type="as" access="read"/>
+    <!-- none | starting | running | blocked | failed; see gnome-extension/README.md -->
+    <property name="ClientState" type="s" access="read"/>
+    <!-- Monitor used by Place(island). Additive version-1 property. -->
+    <property name="PrimaryMonitor" type="u" access="read"/>
+
+    <method name="RequestLaunch">
+      <arg name="args" type="as" direction="in"/>
+      <arg name="launched" type="b" direction="out"/>
+    </method>
+    <method name="RequestHandover">
+      <arg name="args" type="as" direction="in"/>
+      <arg name="accepted" type="b" direction="out"/>
+    </method>
+    <method name="Hello">
+      <arg name="version" type="u" direction="out"/>
+      <arg name="capabilities" type="as" direction="out"/>
+    </method>
+    <method name="Place">
+      <arg name="role" type="s" direction="in"/>
+      <arg name="rect" type="(iiii)" direction="in"/>
+      <arg name="input" type="a(iiii)" direction="in"/>
+    </method>
+    <method name="GetFocus">
+      <arg name="focus" type="a{sv}" direction="out"/>
+    </method>
+    <method name="WindowAction">
+      <arg name="id" type="t" direction="in"/>
+      <arg name="action" type="s" direction="in"/>
+      <arg name="arg" type="v" direction="in"/>
+      <arg name="state" type="a{sv}" direction="out"/>
+    </method>
+    <method name="GetClipboard">
+      <arg name="mime" type="s" direction="in"/>
+      <arg name="bytes" type="ay" direction="out"/>
+    </method>
+    <!-- Additive in contract 1: like GetClipboard, but the transfer stops at
+         max_bytes + 1 and anything longer is Failed. max_bytes must be
+         1..67108864 (InvalidArgs otherwise). -->
+    <method name="GetClipboardBounded">
+      <arg name="mime" type="s" direction="in"/>
+      <arg name="max_bytes" type="u" direction="in"/>
+      <arg name="bytes" type="ay" direction="out"/>
+    </method>
+    <method name="SetClipboard">
+      <arg name="mime" type="s" direction="in"/>
+      <arg name="bytes" type="ay" direction="in"/>
+    </method>
+    <method name="Screenshot">
+      <arg name="include_cursor" type="b" direction="in"/>
+      <arg name="has_area" type="b" direction="in"/>
+      <arg name="area" type="(iiii)" direction="in"/>
+      <arg name="png" type="ay" direction="out"/>
+    </method>
+    <method name="SetCaptureHidden">
+      <arg name="hidden" type="b" direction="in"/>
+    </method>
+    <method name="BindShortcuts">
+      <arg name="bindings" type="a(ss)" direction="in"/>
+      <arg name="results" type="a(sb)" direction="out"/>
+    </method>
+
+    <signal name="FocusChanged">
+      <arg name="focus" type="a{sv}"/>
+    </signal>
+    <signal name="PrimaryMonitorChanged">
+      <arg name="monitor" type="u"/>
+    </signal>
+    <signal name="FullscreenChanged">
+      <arg name="monitor" type="u"/>
+      <arg name="fullscreen" type="b"/>
+    </signal>
+    <signal name="MaximizedTopChanged">
+      <arg name="covered" type="b"/>
+    </signal>
+    <signal name="ShortcutActivated">
+      <arg name="id" type="s"/>
+    </signal>
+    <signal name="ClipboardChanged">
+      <arg name="mimes" type="as"/>
+      <arg name="sensitive" type="b"/>
+    </signal>
+    <signal name="LayoutChanged">
+      <arg name="layout" type="s"/>
+    </signal>
+    <signal name="CapsLock">
+      <arg name="on" type="b"/>
+    </signal>
+    <signal name="Brightness">
+      <arg name="level" type="d"/>
+    </signal>
+  </interface>
+</node>

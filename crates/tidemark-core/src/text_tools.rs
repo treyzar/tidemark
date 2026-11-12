@@ -1,7 +1,7 @@
 //! Text transforms for the Text tab: case, layout fix, transliteration,
 //! whitespace cleanup, JSON and Base64. All pure functions.
 
-use crate::launcher::swap_layout;
+use crate::keyboard::swap_layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {

@@ -1,0 +1,37 @@
+[package]
+name = "tidemark"
+version = "1.4.0-beta.1"
+edition = "2021"
+description = "Tidemark desktop island for Ubuntu (GTK4 + libadwaita)"
+publish = false
+
+# Standalone workspace while the Linux app is reviewed. The Windows workspace
+# at the repository root stays untouched.
+[workspace]
+
+[dependencies]
+serde_json = "1"
+tidemark-core = { path = "../../crates/tidemark-core" }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+async-io = "2"
+futures-lite = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tidemark-record = { path = "../../crates/tidemark-record" }
+tidemark-system = { path = "../../crates/tidemark-system" }
+tidemark-capture = { path = "../../crates/tidemark-capture" }
+tidemark-net = { path = "../../crates/tidemark-net" }
+tidemark-agent = { path = "../../crates/tidemark-agent" }
+tidemark-yandex = { path = "../../crates/tidemark-yandex" }
+libc = "0.2"
+gtk = { package = "gtk4", version = "=0.9.7", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "=0.7.2", features = ["v1_5"] }
+tidemark-mpris = { path = "../../crates/tidemark-mpris" }
+tidemark-artwork = { path = "../../crates/tidemark-artwork" }
+
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

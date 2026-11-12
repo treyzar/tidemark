@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn transform_whole_text_and_selection() {
         let mut f = TextField::with_text("ghbdtn vbh", true);
-        assert!(f.transform(|t| Some(crate::launcher::swap_layout(t))));
+        assert!(f.transform(|t| Some(crate::keyboard::swap_layout(t))));
         assert_eq!(f.text, "привет мир");
         assert_eq!(f.selection(), Some((0, 10)));
         assert!(f.transform(|t| Some(t.to_uppercase())));

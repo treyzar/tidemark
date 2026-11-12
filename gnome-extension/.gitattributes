@@ -1,0 +1,5 @@
+# Scripts run on Linux (shebangs, bash): keep LF even when committed from Windows.
+*.sh text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.xml text eol=lf

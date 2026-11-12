@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo test --release
+      - run: cargo test --workspace --release --locked
       - name: Check resource paths
         shell: pwsh
         run: |
@@ -34,9 +34,13 @@ jobs:
             dist/*.zip
             dist/*-setup.exe
 
+  ubuntu:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/ubuntu.yml
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows
+    needs: [windows, ubuntu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -45,9 +49,37 @@ jobs:
         with:
           name: win-island
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tidemark-ubuntu-preview
+          path: dist
+      - name: Check all installers and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          compgen -G 'dist/*-setup.exe' > /dev/null
+          compgen -G 'dist/*.zip' > /dev/null
+          compgen -G 'dist/*.deb' > /dev/null
+          cd dist
+          sha256sum -- *.exe *.zip *.deb > SHA256SUMS.txt
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: source
+      - name: Extract version-specific release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v target="## $version" '$0 == target { found=1; next } found && /^## / { exit } found { print }' source/CHANGELOG.md > dist/RELEASE_NOTES.md
+          test -s dist/RELEASE_NOTES.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*.zip
             dist/*-setup.exe
+            dist/*.deb
+            dist/SHA256SUMS.txt
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true

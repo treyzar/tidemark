@@ -1,0 +1,256 @@
+name: Ubuntu port checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubuntu-port-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+# This checks the port's shared logic and transport adapters. It does not
+# publish a Linux release or stand in for the GNOME desktop acceptance tests.
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Test shared Rust logic
+        run: cargo test --manifest-path crates/tidemark-core/Cargo.toml --locked
+
+  windows-regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - run: cargo test --workspace --release --locked
+      - name: Check embedded resource paths
+        shell: pwsh
+        run: |
+          rustc --test build.rs -o "$env:RUNNER_TEMP\resource-path-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\resource-path-tests.exe"
+
+  mpris:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install isolated D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-mpris -> target
+      - name: Test MPRIS adapter on an isolated session bus
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked
+
+  yandex-accessibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install private D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-yandex -> target
+      - name: Test accessibility actions with synthetic browser fixtures
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-yandex/Cargo.toml --locked
+
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install private D-Bus session and offline OCR engine
+        run: sudo apt-get update && sudo apt-get install -y dbus tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-capture -> target
+      - name: Test capture portal against isolated fixtures
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-capture/Cargo.toml --locked
+      - name: Verify installed OCR engine using a synthetic blank image
+        run: cargo test --manifest-path crates/tidemark-capture/Cargo.toml --locked installed_tesseract_reads_synthetic_image_offline -- --ignored
+
+  recording:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install isolated recording test tools
+        run: sudo apt-get update && sudo apt-get install -y dbus gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-record -> target
+      - name: Test ScreenCast portal and bounded encoder lifecycle
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked
+      - name: Encode only a synthetic video using installed GStreamer
+        run: cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked installed_gstreamer_encodes_only_synthetic_video -- --ignored
+
+  system-services:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install private D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-system -> target
+      - name: Test system controls against synthetic services
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-system/Cargo.toml --locked
+
+  artwork:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-artwork -> target
+      - name: Test bounded artwork fetching and decoding
+        run: cargo test --manifest-path crates/tidemark-artwork/Cargo.toml --locked
+
+  portable-services:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        crate: [tidemark-agent, tidemark-net]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/${{ matrix.crate }} -> target
+      - name: Test bridge and online service logic without live providers
+        run: cargo test --manifest-path crates/${{ matrix.crate }}/Cargo.toml --locked
+
+  gnome-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test bridge logic and cross-language contract
+        run: npm test --prefix gnome-extension
+      - name: Test opencode integration without live agents
+        run: node --test integrations/opencode/tests/win-island.test.mjs
+
+  gnome-session:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TIDEMARK_HARNESS_ARTIFACT_DIR: ${{ github.workspace }}/gnome-harness-artifacts
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install an isolated GNOME test session
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-shell gjs gir1.2-gtk-4.0 dbus dbus-daemon dconf-service dconf-gsettings-backend dconf-cli libglib2.0-bin libgl1-mesa-dri mesa-vulkan-drivers
+      - name: Exercise the real compositor and authenticated bridge
+        run: CI=true bash gnome-extension/integration/run-headless.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: gnome-session-${{ matrix.os }}
+          path: gnome-harness-artifacts
+          if-no-files-found: warn
+
+  gnome-application:
+    needs: linux-app
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TIDEMARK_HARNESS_ARTIFACT_DIR: ${{ github.workspace }}/gnome-app-artifacts
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tidemark-ubuntu-preview
+          path: dist
+      - name: Install package and isolated GNOME test session
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-shell gjs gir1.2-gtk-4.0 dbus dbus-daemon dconf-service dconf-gsettings-backend dconf-cli libglib2.0-bin libgl1-mesa-dri mesa-vulkan-drivers ./dist/*.deb
+      - name: Exercise installed Rust application through the real GNOME adapter
+        run: CI=true TIDEMARK_HARNESS_APP=1 bash gnome-extension/integration/run-headless.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: gnome-application-${{ matrix.os }}
+          path: gnome-app-artifacts
+          if-no-files-found: error
+
+  linux-app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 1
+      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci/tidemark-config
+      XDG_DATA_HOME: ${{ github.workspace }}/.ci/tidemark-data
+      XDG_CACHE_HOME: ${{ github.workspace }}/.ci/tidemark-cache
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/.ci/tidemark-runtime
+      TIDEMARK_SMOKE_DIR: ${{ github.workspace }}/.ci/tidemark-smoke
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install native build and smoke-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb dbus desktop-file-utils
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TIDEMARK_SMOKE_DIR"
+          chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TIDEMARK_SMOKE_DIR"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: apps/linux -> target
+          cache-on-failure: true
+      - name: Check native GTK APIs
+        run: cargo check --manifest-path apps/linux/Cargo.toml --locked
+      - name: Build the Ubuntu package
+        run: bash scripts/package-linux.sh
+      - name: Run native Rust application tests
+        run: cargo test --release --manifest-path apps/linux/Cargo.toml --locked
+      - name: Install and verify the package
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          test -x /usr/bin/tidemark
+          test -x /usr/bin/island-hook
+          printf '%s\n' '{"kind":"notice","title":"CI bridge probe","text":"synthetic"}' | /usr/bin/island-hook --raw | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"choice": None}'
+          desktop-file-validate /usr/share/applications/io.github.treyzar.Tidemark.desktop
+          dpkg-query -W tidemark
+      - name: Exercise GTK startup with isolated application data
+        run: timeout 45s xvfb-run -a dbus-run-session -- env GSK_RENDERER=cairo G_DEBUG=fatal-criticals /usr/bin/tidemark --smoke-test
+      - name: Verify package removal
+        run: sudo apt-get remove -y tidemark
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tidemark-ubuntu-preview
+          path: dist/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: tidemark-ui-smoke
+          path: .ci/tidemark-smoke/*.png
+          if-no-files-found: warn
