@@ -9,7 +9,7 @@ use online::TranslationState;
 use tidemark_core::text_tools::{self, OPS};
 
 use crate::services::clipboard;
-use crate::ui::{icon_button, muted, page_header, section_title, text_button, Shared};
+use crate::ui::{muted, page_header, section_title, text_button, Shared};
 
 pub struct TextView {
     pub root: gtk::Box,
@@ -39,7 +39,12 @@ impl TextView {
         scrolled.set_child(Some(&view));
         root.append(&scrolled);
 
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let actions = gtk::FlowBox::new();
+        actions.set_selection_mode(gtk::SelectionMode::None);
+        actions.set_min_children_per_line(1);
+        actions.set_max_children_per_line(4);
+        actions.set_column_spacing(6);
+        actions.set_row_spacing(6);
         let paste = text_button("Вставить");
         let copy = text_button("Копировать");
         let clear = text_button("Очистить");
@@ -47,10 +52,10 @@ impl TextView {
         translate.set_tooltip_text(Some(
             "Отправить текст сервису перевода. Направление RU ↔ EN определяется автоматически.",
         ));
-        actions.append(&paste);
-        actions.append(&copy);
-        actions.append(&clear);
-        actions.append(&translate);
+        actions.insert(&paste, -1);
+        actions.insert(&copy, -1);
+        actions.insert(&clear, -1);
+        actions.insert(&translate, -1);
         root.append(&actions);
 
         let status = gtk::Label::new(Some(""));
@@ -255,12 +260,6 @@ impl TextView {
                 show(&status, "Поле очищено.", false);
             });
         }
-
-        // Keep the icon helper exercised in this tab as well: a clear button
-        // with a tooltip is more discoverable than a bare label.
-        let clear_icon = icon_button("edit-clear-symbolic", "Очистить текст");
-        clear_icon.set_visible(false);
-        actions.append(&clear_icon);
 
         Self {
             root,

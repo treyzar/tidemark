@@ -103,4 +103,3 @@ trust downgrade or a claimed successful like.
 - [State enumeration](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/enum.StateType.html)
 - [Role enumeration](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/enum.Role.html)
 - [Chromium document attribute implementation: URI](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/ui/accessibility/platform/ax_platform_node_auralinux.cc)
-
