@@ -26,6 +26,7 @@ pub struct ControlView {
     window_status: gtk::Label,
     above: gtk::Button,
     opacity: gtk::SpinButton,
+    shown_opacity: Cell<Option<(u64, u8)>>,
     target: Rc<RefCell<Option<(Peer, FocusInfo)>>>,
     pending: Rc<RefCell<Option<(u64, Peer, u64)>>>,
 }
@@ -259,6 +260,7 @@ impl ControlView {
             window_status,
             above,
             opacity,
+            shown_opacity: Cell::new(None),
             target,
             pending,
         }
@@ -284,6 +286,8 @@ impl ControlView {
         self.update_window(supported);
     }
     fn update_window(&self, supported: bool) {
+        self.window_gate
+            .set_sensitive(self.pending.borrow().is_none());
         let target = self.target.borrow();
         if let Some((_, focus)) = target.as_ref() {
             self.window_title.set_text(&format!(
@@ -296,8 +300,12 @@ impl ControlView {
             } else {
                 "Поверх всех окон"
             });
-            self.opacity
-                .set_value(f64::from(focus.opacity) * 100.0 / 255.0);
+            let opacity_key = (focus.id, focus.opacity);
+            if self.shown_opacity.get() != Some(opacity_key) {
+                self.opacity
+                    .set_value(f64::from(focus.opacity) * 100.0 / 255.0);
+                self.shown_opacity.set(Some(opacity_key));
+            }
         } else {
             self.window_title
                 .set_text("Нет подтверждённого внешнего окна.");

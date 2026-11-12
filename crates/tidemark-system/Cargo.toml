@@ -1,0 +1,16 @@
+[package]
+name = "tidemark-system"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+thiserror = "2"
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+zvariant = "5"
+async-io = "2"
+futures-lite = "2"
+libc = "0.2"
+[dev-dependencies]
+tempfile = "3"

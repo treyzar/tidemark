@@ -81,6 +81,34 @@ jobs:
       - name: Verify installed OCR engine using a synthetic blank image
         run: cargo test --manifest-path crates/tidemark-capture/Cargo.toml --locked installed_tesseract_reads_synthetic_image_offline -- --ignored
 
+  recording:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install isolated recording test tools
+        run: sudo apt-get update && sudo apt-get install -y dbus gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-record -> target
+      - name: Test ScreenCast portal and bounded encoder lifecycle
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked
+      - name: Encode only a synthetic video using installed GStreamer
+        run: cargo test --manifest-path crates/tidemark-record/Cargo.toml --locked installed_gstreamer_encodes_only_synthetic_video -- --ignored
+
+  system-services:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install private D-Bus session tool
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: crates/tidemark-system -> target
+      - name: Test system controls against synthetic services
+        run: dbus-run-session -- cargo test --manifest-path crates/tidemark-system/Cargo.toml --locked
+
   artwork:
     strategy:
       matrix:

@@ -423,7 +423,9 @@ impl Editor {
                 if let (Some(window), Some(texture)) =
                     (self.window.upgrade(), self.texture.borrow().as_ref())
                 {
-                    window.display().clipboard().set_texture(texture);
+                    gtk::prelude::WidgetExt::display(&window)
+                        .clipboard()
+                        .set_texture(texture);
                     self.message("Изображение скопировано.", false);
                 }
             }
@@ -435,7 +437,9 @@ impl Editor {
                     let text =
                         self.buffer
                             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false);
-                    window.display().clipboard().set_text(text.as_str());
+                    gtk::prelude::WidgetExt::display(&window)
+                        .clipboard()
+                        .set_text(text.as_str());
                     self.message("Результат скопирован.", false);
                 }
             }
