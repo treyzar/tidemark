@@ -124,6 +124,7 @@ const HANDLE_H: f32 = 6.0;
 const VOLUME_THROTTLE: Duration = Duration::from_millis(40);
 const HOTKEY_THEME: i32 = 1;
 const HOTKEY_LAUNCHER: i32 = 2;
+const HOTKEY_LIKE:i32=3;
 
 pub struct Island {
     hwnd: HWND,
@@ -150,6 +151,10 @@ pub struct Island {
     media_service: Option<media::Service>,
     media: Option<MediaState>,
     media_view: Option<MediaView>,
+    like_track: Option<(String,String,bool)>,
+    like_busy: bool,
+    like_slot: Arc<Mutex<Option<crate::yandex_music::Outcome>>>,
+    media_message: String,
     dragging_volume: bool,
     last_volume_sent: Option<Instant>,
     lyrics_service: Option<lyrics::Service>,
@@ -188,6 +193,7 @@ pub struct Island {
     /// The window the user works in (never the island itself).
     active: Option<ActiveApp>,
     window_view: Option<WindowView>,
+    window_message: String,
     /// Icons of apps seen in notices / the window tile, by exe path.
     app_icons: Vec<(String, DockIcon)>,
     extra_icons: Vec<DockIcon>,
@@ -316,6 +322,15 @@ pub fn frame() {
     with_island(|i| i.frame());
 }
 
+/// Modal Win32 menus can dispatch completion messages while Island is borrowed.
+/// Drain the mailbox again from the outer loop after the menu releases it.
+pub fn poll_completed_actions() {
+    with_island(|i| {
+        let ready=i.like_busy && i.like_slot.lock().unwrap_or_else(|e|e.into_inner()).is_some();
+        if ready {i.like_done();}
+    });
+}
+
 pub fn create(cfg: Config) -> Result<HWND> {
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
@@ -371,6 +386,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             media_service: None,
             media: None,
             media_view: None,
+            like_track:None,like_busy:false,like_slot:Arc::new(Mutex::new(None)),media_message:String::new(),
             dragging_volume: false,
             last_volume_sent: None,
             lyrics_service: None,
@@ -394,6 +410,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             in_use: InUse::default(),
             active: None,
             window_view: None,
+            window_message: String::new(),
             app_icons: Vec::new(),
             extra_icons: Vec::new(),
             layout: signals::foreground_layout(),
@@ -482,6 +499,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
         TASKBAR_CREATED.with(|c| c.set(RegisterWindowMessageW(w!("TaskbarCreated"))));
         tray::add(hwnd);
         let _ = RegisterHotKey(Some(hwnd), HOTKEY_THEME, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T' as u32);
+        if RegisterHotKey(Some(hwnd),HOTKEY_LIKE,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,'L' as u32).is_err() {crate::stats::log_line("Ctrl+Alt+L is already registered by another application");}
         if with_island(|i| i.cfg.launcher) == Some(true) {
             let _ = RegisterHotKey(Some(hwnd), HOTKEY_LAUNCHER, MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32);
         }
@@ -766,7 +784,9 @@ impl Island {
     }
 
     fn media_arrived(&mut self) {
+        let before=self.media.as_ref().map(|m|(m.title.clone(),m.artist.clone()));
         self.media = self.media_service.as_ref().and_then(|s| s.get());
+        if before!=self.media.as_ref().map(|m|(m.title.clone(),m.artist.clone())) {self.like_track=None;self.media_message.clear();}
         self.request_lyrics();
         self.refresh_media_view();
         self.refresh_compact_media();
@@ -879,6 +899,44 @@ impl Island {
         }
     }
 
+    fn like_song(&mut self) {
+        if self.like_busy {return;}
+        let Some(m)=self.media.as_ref() else{return};
+        let want=self.like_track.as_ref().map(|(_,_,on)|!*on).unwrap_or(true);
+        self.like_busy=crate::yandex_music::spawn(self.hwnd,m.title.clone(),m.artist.clone(),want,self.like_slot.clone());
+        self.media_message=if self.like_busy {"Проверяю лайк в Яндекс Музыке…".into()}else{"Не удалось запустить действие. Повторите".into()};
+        self.refresh_media_view();
+    }
+
+    fn like_done(&mut self) {
+        let Some(outcome)=self.like_slot.lock().unwrap_or_else(|e|e.into_inner()).take() else{return};
+        self.like_busy=false;
+        {
+            crate::stats::log_line(&match &outcome.result {Ok(on)=>format!("yandex-like result: liked={on}"),Err(e)=>format!("yandex-like result: error: {e}")});
+            if self.media.as_ref().is_some_and(|m|m.title==outcome.title && m.artist==outcome.artist) {
+                match outcome.result {
+                    Ok(on)=>{self.like_track=Some((outcome.title,outcome.artist,on));self.media_message=if on {"В избранном Яндекс Музыки".into()}else{"Лайк снят в Яндекс Музыке".into()};},
+                    Err(e)=>{self.like_track=None;self.media_message=e;},
+                }
+            }
+        }
+        self.refresh_media_view();
+        if !self.media_message.is_empty() {
+            self.show_toast(Toast{badge:Badge::Text("ЯМ".into()),title:"Яндекс Музыка".into(),text:self.media_message.clone(),level:None,actions:Vec::new()},TOAST_MS);
+        }
+    }
+
+    fn seek_song(&mut self,x:i32,y:i32) {
+        let Some(m)=self.media.as_ref().filter(|m|m.can_seek) else{return};
+        let Some(tile)=self.tiles.iter().find(|t|t.kind==TileKind::Media) else{return};
+        let r=layout::media_regions(tile).progress;
+        let shape=self.shape();let origin=self.panel_origin(&shape);
+        let dx=(x as f32-origin.0)/self.scale;
+        let _=y;
+        let target=media::seek_position(m.duration,(dx-r.x)/r.w);
+        if let Some(s)=&self.media_service {s.send(Command::SeekTo{position:target,title:m.title.clone(),artist:m.artist.clone()});}
+    }
+
     /// Re-derives what the player tile shows (position moves every second).
     fn refresh_media_view(&mut self) {
         let view = self.media.as_ref().map(|m| {
@@ -900,6 +958,7 @@ impl Island {
                 can_prev: m.can_prev,
                 can_next: m.can_next,
                 lyric: None,
+                liked:self.like_track.as_ref().map(|(_,_,liked)|*liked),like_busy:self.like_busy,message:self.media_message.clone(),
             }
         });
         let lyric = self.current_lyric();
@@ -1032,6 +1091,9 @@ impl Island {
             TileKind::Media => {
                 let m = self.media.as_ref()?;
                 let r = layout::media_regions(tile);
+                if r.like.contains(dx,dy) {return (!self.like_busy).then_some(Hit::MediaLike);}
+                if r.progress_hit.contains(dx,dy) {return m.can_seek.then_some(Hit::MediaSeek);}
+                if r.title.contains(dx,dy)||r.artist.contains(dx,dy) {return Some(Hit::MediaCopy);}
                 [(Hit::MediaPrev, r.prev), (Hit::MediaPlay, r.play), (Hit::MediaNext, r.next)]
                     .into_iter()
                     .find(|(_, rc)| rc.contains(dx, dy))
@@ -1048,6 +1110,7 @@ impl Island {
                 let (slots, add) = layout::dock_slots(tile, self.dock_icons.len());
                 slots.iter().position(|r| r.contains(dx, dy)).map(Hit::Dock).or_else(|| add.contains(dx, dy).then_some(Hit::DockAdd))
             }
+            TileKind::Window => self.active.as_ref().and_then(|_|layout::window_hit(tile,dx,dy)),
             _ => None,
         }
     }
@@ -1063,7 +1126,9 @@ impl Island {
                 svc.send(c);
             }
         };
-        match self.hit_at(x, y) {
+        let hit=self.hit_at(x,y);
+        if matches!(hit,Some(Hit::WinPin|Hit::WinOpacity|Hit::WinMinimize|Hit::WinActivate|Hit::WinMenu)) {self.window_message.clear();}
+        match hit {
             Some(Hit::MediaPlay) => {
                 // Flip the icon now; the player's own event confirms it.
                 if let Some(m) = self.media.as_mut() {
@@ -1077,6 +1142,16 @@ impl Island {
             }
             Some(Hit::MediaNext) => send(self, Command::Next),
             Some(Hit::MediaPrev) => send(self, Command::Prev),
+            Some(Hit::MediaLike)=>self.like_song(),
+            Some(Hit::MediaSeek)=>self.seek_song(x,y),
+            Some(Hit::MediaCopy)=>{
+                if let Some(m)=&self.media {
+                    let text=if m.artist.is_empty(){m.title.clone()}else{format!("{} — {}",m.artist,m.title)};
+                    self.quiet_next_clip=true;
+                    self.media_message=if clipboard::write(self.hwnd,&Entry::Text{text}){"Название скопировано".into()}else{"Не удалось скопировать".into()};
+                    self.refresh_media_view();
+                }
+            },
             Some(Hit::MediaVolume) => {
                 self.dragging_volume = true;
                 self.drag_volume(x, true);
@@ -1157,21 +1232,25 @@ impl Island {
             }
             Some(Hit::WinPin) => {
                 if let Some(app) = self.active.as_mut() {
-                    app.topmost = active_app::toggle_topmost(app);
+                    match active_app::toggle_topmost(app) {Ok(on)=>app.topmost=on,Err(e)=>self.window_message=e}
                 }
                 self.refresh_window_view();
             }
             Some(Hit::WinOpacity) => {
                 if let Some(app) = self.active.as_mut() {
-                    app.alpha = active_app::cycle_opacity(app);
+                    match active_app::cycle_opacity(app) {Ok(alpha)=>app.alpha=alpha,Err(e)=>self.window_message=e}
                 }
                 self.refresh_window_view();
             }
             Some(Hit::WinMinimize) => {
                 if let Some(app) = &self.active {
-                    active_app::minimize(app);
+                    if let Err(e)=active_app::minimize(app) {self.window_message=e;self.refresh_window_view();}
                 }
             }
+            Some(Hit::WinActivate) => {
+                if let Some(app)=&self.active {if let Err(e)=active_app::activate(app) {self.window_message=e;self.refresh_window_view();}}
+            }
+            Some(Hit::WinMenu) => self.window_menu(),
             Some(Hit::DockAdd) => {
                 if let Some(path) = dock::pick(self.hwnd) {
                     if let Some(list) = self.cfg.dock_apps.as_mut() {
@@ -2340,9 +2419,41 @@ impl Island {
         }
     }
 
+    fn window_menu(&mut self) {
+        let Some(app)=self.active.clone() else{return};
+        let command=unsafe {
+            let Ok(menu)=CreatePopupMenu() else{return};
+            for (id,label) in [(1,"Открыть окно"),(2,"Развернуть / восстановить"),(3,"На левую половину экрана"),(4,"На правую половину экрана"),(5,"Закрепить приложение в доке"),(6,"Скопировать заголовок окна"),(7,"Показать файл приложения")] {
+                let _=AppendMenuW(menu,MF_STRING,id,&windows::core::HSTRING::from(label));
+            }
+            let mut point=POINT::default();let _=GetCursorPos(&mut point);let _=SetForegroundWindow(self.hwnd);
+            let result=TrackPopupMenu(menu,TPM_RIGHTBUTTON|TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,None,self.hwnd,None);
+            let _=DestroyMenu(menu);result.0
+        };
+        // A track change can arrive during the menu's nested message loop.
+        // Reconcile with the worker snapshot after it returns.
+        self.media_arrived();
+        let result=match command {
+            1=>active_app::activate(&app),
+            2=>active_app::toggle_maximize(&app),
+            3=>active_app::snap(&app,false),
+            4=>active_app::snap(&app,true),
+            5=>{
+                let list=self.cfg.dock_apps.get_or_insert_with(dock::default_apps);
+                if !list.iter().any(|p|dock::expand(p).eq_ignore_ascii_case(&app.exe)) {list.push(app.exe.clone());self.cfg.save();self.load_dock();}
+                Ok(())
+            },
+            6=>{self.quiet_next_clip=true;if clipboard::write(self.hwnd,&Entry::Text{text:app.title.clone()}){Ok(())}else{Err("Не удалось скопировать заголовок".into())}},
+            7=>active_app::reveal(&app),
+            _=>return,
+        };
+        self.window_message=result.err().unwrap_or_default();self.refresh_window_view();
+    }
+
     /// Right-click menu for clipboard rows and dock apps.
     fn context_menu(&mut self, x: i32, y: i32) {
         let hit = self.hit_at(x, y);
+        if matches!(hit,Some(Hit::WinActivate|Hit::WinPin|Hit::WinOpacity|Hit::WinMinimize|Hit::WinMenu)) {self.window_menu();return;}
         let items: &[(usize, PCWSTR)] = match hit {
             Some(Hit::Clip(_)) => &[(MENU_REMOVE, w!("Удалить из истории")), (MENU_CLEAR, w!("Очистить историю"))],
             Some(Hit::Dock(_)) => &[(MENU_REMOVE, w!("Убрать из дока"))],
@@ -2495,6 +2606,7 @@ impl Island {
 
     fn set_active(&mut self, app: ActiveApp, announce: bool) {
         let switched = self.active.as_ref().is_none_or(|a| a.hwnd != app.hwnd);
+        if switched {self.window_message.clear();}
         let icon = self.app_icon(&app.exe);
         let other_notice = self.compact.toast.as_ref().is_some_and(|t| !matches!(t.badge, Badge::App(_)));
         if announce && switched && self.cfg.show_active_app && !self.handle_mode() && !other_notice {
@@ -2523,9 +2635,10 @@ impl Island {
         let view = self.active.as_ref().map(|a| WindowView {
             icon_id: Some(dock::path_id(&a.exe)).filter(|id| self.extra_icons.iter().any(|d| d.id == *id && d.icon.is_some())),
             name: a.name.clone(),
-            title: a.title.clone(),
+            title: if self.window_message.is_empty(){a.title.clone()}else{self.window_message.clone()},
             topmost: a.topmost,
             opacity: (a.alpha as u32 * 100 + 127) / 255,
+            notice:!self.window_message.is_empty(),
         });
         if view != self.window_view {
             self.window_view = view;
@@ -3054,6 +3167,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| i.media_arrived());
             return LRESULT(0);
         }
+        crate::yandex_music::WM_YANDEX_LIKE => {
+            with_island(|i|i.like_done());
+            return LRESULT(0);
+        }
         WM_TIMER if wparam.0 == TIMER_TRIM => {
             let _ = KillTimer(Some(hwnd), TIMER_TRIM);
             with_island(|i| {
@@ -3177,6 +3294,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| if i.tab == Tab::Search { i.close_search() } else { i.open_search() });
             return LRESULT(0);
         }
+        WM_HOTKEY if wparam.0 as i32==HOTKEY_LIKE => {
+            with_island(|i|i.like_song());return LRESULT(0);
+        }
         WM_CONTROL => {
             with_island(|i| i.control_arrived());
             return LRESULT(0);
@@ -3284,6 +3404,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_island(|i| i.fs_watcher = None);
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY_THEME);
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY_LAUNCHER);
+            let _=UnregisterHotKey(Some(hwnd),HOTKEY_LIKE);
             tray::remove(hwnd);
             PostQuitMessage(0);
             return LRESULT(0);

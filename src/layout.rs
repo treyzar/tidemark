@@ -149,6 +149,8 @@ pub struct MediaRegions {
     /// The visible volume track; `volume_hit` is taller for easy grabbing.
     pub volume: Rect,
     pub volume_hit: Rect,
+    pub like: Rect,
+    pub progress_hit: Rect,
 }
 
 pub fn media_regions(tile: &Placed) -> MediaRegions {
@@ -156,20 +158,77 @@ pub fn media_regions(tile: &Placed) -> MediaRegions {
     let text_x = x + 88.0;
     let text_w = (x + w - 12.0) - text_x;
     let cx = text_x + text_w / 2.0;
-    let button = |dx: f32| Rect { x: cx + dx - 14.0, y: y + 54.0, w: 28.0, h: 28.0 };
-    let volume = Rect { x: x + 32.0, y: y + 122.0, w: w - 44.0, h: 4.0 };
+    let button = |dx: f32| Rect {
+        x: cx + dx - 14.0,
+        y: y + 54.0,
+        w: 28.0,
+        h: 28.0,
+    };
+    let volume = Rect {
+        x: x + 32.0,
+        y: y + 122.0,
+        w: w - 44.0,
+        h: 4.0,
+    };
     MediaRegions {
-        cover: Rect { x: x + 12.0, y: y + 12.0, w: 64.0, h: 64.0 },
-        title: Rect { x: text_x, y: y + 12.0, w: text_w, h: 20.0 },
-        artist: Rect { x: text_x, y: y + 32.0, w: text_w, h: 18.0 },
+        cover: Rect {
+            x: x + 12.0,
+            y: y + 12.0,
+            w: 64.0,
+            h: 64.0,
+        },
+        title: Rect {
+            x: text_x,
+            y: y + 12.0,
+            w: text_w,
+            h: 20.0,
+        },
+        artist: Rect {
+            x: text_x,
+            y: y + 32.0,
+            w: text_w,
+            h: 18.0,
+        },
         prev: button(-38.0),
         play: button(0.0),
         next: button(38.0),
-        progress: Rect { x: x + 12.0, y: y + 90.0, w: w - 24.0, h: 4.0 },
-        times: Rect { x: x + 12.0, y: y + 97.0, w: w - 24.0, h: 14.0 },
-        speaker: Rect { x: x + 12.0, y: y + 117.0, w: 14.0, h: 14.0 },
+        progress: Rect {
+            x: x + 12.0,
+            y: y + 90.0,
+            w: w - 24.0,
+            h: 4.0,
+        },
+        times: Rect {
+            x: x + 12.0,
+            y: y + 97.0,
+            w: w - 24.0,
+            h: 14.0,
+        },
+        speaker: Rect {
+            x: x + 12.0,
+            y: y + 117.0,
+            w: 14.0,
+            h: 14.0,
+        },
         volume,
-        volume_hit: Rect { x: volume.x - 6.0, y: volume.y - 8.0, w: volume.w + 12.0, h: volume.h + 16.0 },
+        volume_hit: Rect {
+            x: volume.x - 6.0,
+            y: volume.y - 8.0,
+            w: volume.w + 12.0,
+            h: volume.h + 16.0,
+        },
+        like: Rect {
+            x: x + w - 36.0,
+            y: y + 54.0,
+            w: 24.0,
+            h: 28.0,
+        },
+        progress_hit: Rect {
+            x: x + 12.0,
+            y: y + 84.0,
+            w: w - 24.0,
+            h: 16.0,
+        },
     }
 }
 
@@ -180,6 +239,9 @@ pub enum Hit {
     MediaPlay,
     MediaNext,
     MediaVolume,
+    MediaLike,
+    MediaSeek,
+    MediaCopy,
     /// Row `n` of the clipboard history tile.
     Clip(usize),
     /// App `n` of the dock.
@@ -188,6 +250,8 @@ pub enum Hit {
     WinPin,
     WinOpacity,
     WinMinimize,
+    WinActivate,
+    WinMenu,
     Tab(Tab),
     NoteField,
     RemindField,
@@ -234,7 +298,14 @@ pub enum Tab {
     Search,
 }
 
-pub const TABS: [Tab; 6] = [Tab::Home, Tab::Clipboard, Tab::Notes, Tab::Shelf, Tab::Text, Tab::Control];
+pub const TABS: [Tab; 6] = [
+    Tab::Home,
+    Tab::Clipboard,
+    Tab::Notes,
+    Tab::Shelf,
+    Tab::Text,
+    Tab::Control,
+];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -261,7 +332,12 @@ pub fn tab_buttons(active: Tab) -> Vec<(Tab, Rect)> {
     TABS.iter()
         .map(|&t| {
             let w = if t == active { 100.0 } else { 34.0 };
-            let r = Rect { x, y: 10.0, w, h: 28.0 };
+            let r = Rect {
+                x,
+                y: 10.0,
+                w,
+                h: 28.0,
+            };
             x += w + 6.0;
             (t, r)
         })
@@ -291,29 +367,94 @@ pub fn notes_regions(width: f32) -> NotesRegions {
     let top = TAB_BAR_H;
     let inner = width - PAD * 2.0;
     let left_w = (inner - GAP) * 0.52;
-    let note_card = Rect { x: PAD, y: top, w: left_w, h: PAGE_H - PAD };
+    let note_card = Rect {
+        x: PAD,
+        y: top,
+        w: left_w,
+        h: PAGE_H - PAD,
+    };
     let rx = PAD + left_w + GAP;
     let rw = inner - left_w - GAP;
-    let timer_card = Rect { x: rx, y: top, w: rw, h: 116.0 };
+    let timer_card = Rect {
+        x: rx,
+        y: top,
+        w: rw,
+        h: 116.0,
+    };
     let b = 30.0;
-    let reset = Rect { x: rx + rw - 12.0 - b, y: top + 34.0, w: b, h: b };
-    let toggle = Rect { x: reset.x - 8.0 - b, ..reset };
+    let reset = Rect {
+        x: rx + rw - 12.0 - b,
+        y: top + 34.0,
+        w: b,
+        h: b,
+    };
+    let toggle = Rect {
+        x: reset.x - 8.0 - b,
+        ..reset
+    };
     let pw = (rw - 24.0 - 3.0 * 6.0) / 4.0;
-    let presets = (0..4).map(|i| Rect { x: rx + 12.0 + i as f32 * (pw + 6.0), y: top + 78.0, w: pw, h: 26.0 }).collect();
-    let remind_card = Rect { x: rx, y: top + 116.0 + GAP, w: rw, h: PAGE_H - PAD - 116.0 - GAP };
+    let presets = (0..4)
+        .map(|i| Rect {
+            x: rx + 12.0 + i as f32 * (pw + 6.0),
+            y: top + 78.0,
+            w: pw,
+            h: 26.0,
+        })
+        .collect();
+    let remind_card = Rect {
+        x: rx,
+        y: top + 116.0 + GAP,
+        w: rw,
+        h: PAGE_H - PAD - 116.0 - GAP,
+    };
     let ry = remind_card.y;
-    let rows: Vec<Rect> = (0..3).map(|i| Rect { x: rx + 6.0, y: ry + 74.0 + i as f32 * 22.0, w: rw - 12.0, h: 22.0 }).collect();
-    let removes = rows.iter().map(|r| Rect { x: r.x + r.w - 24.0, y: r.y, w: 24.0, h: r.h }).collect();
+    let rows: Vec<Rect> = (0..3)
+        .map(|i| Rect {
+            x: rx + 6.0,
+            y: ry + 74.0 + i as f32 * 22.0,
+            w: rw - 12.0,
+            h: 22.0,
+        })
+        .collect();
+    let removes = rows
+        .iter()
+        .map(|r| Rect {
+            x: r.x + r.w - 24.0,
+            y: r.y,
+            w: 24.0,
+            h: r.h,
+        })
+        .collect();
     NotesRegions {
-        note: Rect { x: PAD + 12.0, y: top + 32.0, w: left_w - 24.0, h: PAGE_H - PAD - 44.0 },
+        note: Rect {
+            x: PAD + 12.0,
+            y: top + 32.0,
+            w: left_w - 24.0,
+            h: PAGE_H - PAD - 44.0,
+        },
         note_card,
-        timer_text: Rect { x: rx + 12.0, y: top + 28.0, w: rw - 24.0 - 2.0 * b - 16.0, h: 44.0 },
+        timer_text: Rect {
+            x: rx + 12.0,
+            y: top + 28.0,
+            w: rw - 24.0 - 2.0 * b - 16.0,
+            h: 44.0,
+        },
         toggle,
         reset,
         presets,
         timer_card,
-        remind: Rect { x: rx + 10.0, y: ry + 30.0, w: rw - 20.0, h: 26.0 },
-        remind_hint: Rect { x: rx + 12.0, y: ry + 57.0, w: rw - 24.0, h: 16.0 },
+        remind: Rect {
+            x: rx + 10.0,
+            y: ry + 30.0,
+            w: rw - 20.0,
+            h: 26.0,
+        },
+        remind_hint: Rect {
+            x: rx + 12.0,
+            y: ry + 57.0,
+            w: rw - 24.0,
+            h: 16.0,
+        },
         remind_card,
         rows,
         removes,
@@ -324,14 +465,35 @@ pub const SEARCH_ROWS: usize = 6;
 pub const SEARCH_H: f32 = 64.0 + SEARCH_ROWS as f32 * 38.0 + 8.0;
 
 pub fn search_field(width: f32) -> Rect {
-    Rect { x: PAD, y: 12.0, w: width - 2.0 * PAD, h: 40.0 }
+    Rect {
+        x: PAD,
+        y: 12.0,
+        w: width - 2.0 * PAD,
+        h: 40.0,
+    }
 }
 
 pub fn search_rows(width: f32) -> Vec<Rect> {
-    (0..SEARCH_ROWS).map(|i| Rect { x: PAD, y: 62.0 + i as f32 * 38.0, w: width - 2.0 * PAD, h: 36.0 }).collect()
+    (0..SEARCH_ROWS)
+        .map(|i| Rect {
+            x: PAD,
+            y: 62.0 + i as f32 * 38.0,
+            w: width - 2.0 * PAD,
+            h: 36.0,
+        })
+        .collect()
 }
 
-pub const TOOLS: [&str; 8] = ["Область", "Весь экран", "Текст", "QR-код", "Пипетка", "Без формата", "Команда", "Запись"];
+pub const TOOLS: [&str; 8] = [
+    "Область",
+    "Весь экран",
+    "Текст",
+    "QR-код",
+    "Пипетка",
+    "Без формата",
+    "Команда",
+    "Запись",
+];
 /// Index of the screen recording button in TOOLS.
 pub const TOOL_RECORD: usize = 7;
 
@@ -340,7 +502,14 @@ pub fn tool_buttons(tile: &Placed) -> Vec<Rect> {
     let n = TOOLS.len() as f32;
     let gap = 6.0;
     let w = (tile.w - 16.0 - gap * (n - 1.0)) / n;
-    (0..TOOLS.len()).map(|i| Rect { x: tile.x + 8.0 + i as f32 * (w + gap), y: tile.y + 6.0, w, h: tile.h - 12.0 }).collect()
+    (0..TOOLS.len())
+        .map(|i| Rect {
+            x: tile.x + 8.0 + i as f32 * (w + gap),
+            y: tile.y + 6.0,
+            w,
+            h: tile.h - 12.0,
+        })
+        .collect()
 }
 
 /// Parts of the Text tab.
@@ -360,19 +529,56 @@ pub fn text_regions(width: f32) -> TextRegions {
     let inner = width - 2.0 * PAD;
     let lw = (inner - GAP) * 0.56;
     let h = PAGE_H - PAD;
-    let card = Rect { x: PAD, y: top, w: lw, h };
+    let card = Rect {
+        x: PAD,
+        y: top,
+        w: lw,
+        h,
+    };
     let rx = PAD + lw + GAP;
     let rw = inner - lw - GAP;
     let bw = (rw - 6.0) / 2.0;
-    let ops = (0..12).map(|i| Rect { x: rx + (i % 2) as f32 * (bw + 6.0), y: top + (i / 2) as f32 * 34.0, w: bw, h: 30.0 }).collect();
+    let ops = (0..12)
+        .map(|i| Rect {
+            x: rx + (i % 2) as f32 * (bw + 6.0),
+            y: top + (i / 2) as f32 * 34.0,
+            w: bw,
+            h: 30.0,
+        })
+        .collect();
     TextRegions {
-        field: Rect { x: PAD + 12.0, y: top + 12.0, w: lw - 24.0, h: h - 56.0 },
-        stats: Rect { x: PAD + 12.0, y: top + h - 36.0, w: lw - 120.0, h: 16.0 },
-        status: Rect { x: PAD + 12.0, y: top + h - 20.0, w: lw - 120.0, h: 16.0 },
-        copy: Rect { x: PAD + lw - 100.0, y: top + h - 38.0, w: 88.0, h: 28.0 },
+        field: Rect {
+            x: PAD + 12.0,
+            y: top + 12.0,
+            w: lw - 24.0,
+            h: h - 56.0,
+        },
+        stats: Rect {
+            x: PAD + 12.0,
+            y: top + h - 36.0,
+            w: lw - 120.0,
+            h: 16.0,
+        },
+        status: Rect {
+            x: PAD + 12.0,
+            y: top + h - 20.0,
+            w: lw - 120.0,
+            h: 16.0,
+        },
+        copy: Rect {
+            x: PAD + lw - 100.0,
+            y: top + h - 38.0,
+            w: 88.0,
+            h: 28.0,
+        },
         card,
         ops,
-        translate: Rect { x: rx, y: top + 6.0 * 34.0 + 4.0, w: rw, h: 34.0 },
+        translate: Rect {
+            x: rx,
+            y: top + 6.0 * 34.0 + 4.0,
+            w: rw,
+            h: 34.0,
+        },
     }
 }
 
@@ -393,34 +599,98 @@ pub struct ControlRegions {
 pub fn control_regions(width: f32) -> ControlRegions {
     let top = TAB_BAR_H;
     let inner = width - 2.0 * PAD;
-    let segments = (0..3).map(|i| Rect { x: PAD + i as f32 * 96.0, y: top, w: 92.0, h: 28.0 }).collect();
-    let settings = Rect { x: width - PAD - 96.0, y: top, w: 96.0, h: 28.0 };
-    let refresh = Rect { x: settings.x - 34.0, y: top, w: 28.0, h: 28.0 };
-    let rows: Vec<Rect> = (0..CTL_ROWS).map(|i| Rect { x: PAD, y: top + 36.0 + i as f32 * 30.0, w: inner, h: 28.0 }).collect();
-    let actions = rows.iter().map(|r| Rect { x: r.x + r.w - 104.0, y: r.y + 2.0, w: 100.0, h: 24.0 }).collect();
+    let segments = (0..3)
+        .map(|i| Rect {
+            x: PAD + i as f32 * 96.0,
+            y: top,
+            w: 92.0,
+            h: 28.0,
+        })
+        .collect();
+    let settings = Rect {
+        x: width - PAD - 96.0,
+        y: top,
+        w: 96.0,
+        h: 28.0,
+    };
+    let refresh = Rect {
+        x: settings.x - 34.0,
+        y: top,
+        w: 28.0,
+        h: 28.0,
+    };
+    let rows: Vec<Rect> = (0..CTL_ROWS)
+        .map(|i| Rect {
+            x: PAD,
+            y: top + 36.0 + i as f32 * 30.0,
+            w: inner,
+            h: 28.0,
+        })
+        .collect();
+    let actions = rows
+        .iter()
+        .map(|r| Rect {
+            x: r.x + r.w - 104.0,
+            y: r.y + 2.0,
+            w: 100.0,
+            h: 24.0,
+        })
+        .collect();
     let py = top + 36.0 + CTL_ROWS as f32 * 30.0 + 22.0;
     let pw = (inner - 3.0 * GAP) / 4.0;
-    let power = (0..4).map(|i| Rect { x: PAD + i as f32 * (pw + GAP), y: py, w: pw, h: top + PAGE_H - PAD - py }).collect();
+    let power = (0..4)
+        .map(|i| Rect {
+            x: PAD + i as f32 * (pw + GAP),
+            y: py,
+            w: pw,
+            h: top + PAGE_H - PAD - py,
+        })
+        .collect();
     ControlRegions {
         segments,
         refresh,
         settings,
         rows,
         actions,
-        message: Rect { x: PAD + 4.0, y: top + 36.0 + CTL_ROWS as f32 * 30.0 + 2.0, w: inner - 8.0, h: 16.0 },
+        message: Rect {
+            x: PAD + 4.0,
+            y: top + 36.0 + CTL_ROWS as f32 * 30.0 + 2.0,
+            w: inner - 8.0,
+            h: 16.0,
+        },
         power,
     }
 }
 
 /// Password field and its button inside list row `r`.
 pub fn password_parts(r: &Rect) -> (Rect, Rect) {
-    let go = Rect { x: r.x + r.w - 76.0, y: r.y + 2.0, w: 72.0, h: 24.0 };
-    (Rect { x: r.x + r.w * 0.45, y: r.y + 2.0, w: go.x - 6.0 - (r.x + r.w * 0.45), h: 24.0 }, go)
+    let go = Rect {
+        x: r.x + r.w - 76.0,
+        y: r.y + 2.0,
+        w: 72.0,
+        h: 24.0,
+    };
+    (
+        Rect {
+            x: r.x + r.w * 0.45,
+            y: r.y + 2.0,
+            w: go.x - 6.0 - (r.x + r.w * 0.45),
+            h: 24.0,
+        },
+        go,
+    )
 }
 
 /// Rows of the Clipboard tab.
 pub fn clip_page_rows() -> Vec<Rect> {
-    (0..8).map(|i| Rect { x: PAD, y: TAB_BAR_H + i as f32 * 34.0, w: 0.0, h: 32.0 }).collect()
+    (0..8)
+        .map(|i| Rect {
+            x: PAD,
+            y: TAB_BAR_H + i as f32 * 34.0,
+            w: 0.0,
+            h: 32.0,
+        })
+        .collect()
 }
 
 /// Buttons of a notice in the collapsed pill, relative to the pill's
@@ -432,9 +702,18 @@ pub fn toast_actions(pill_w: f32, pill_h: f32, labels: &[String]) -> Vec<Rect> {
         .rev()
         .map(|label| {
             // One-character buttons ("✓", "✕") are round.
-            let w = if label.chars().count() == 1 { pill_h - 10.0 } else { 14.0 + label.chars().count() as f32 * 7.0 };
+            let w = if label.chars().count() == 1 {
+                pill_h - 10.0
+            } else {
+                14.0 + label.chars().count() as f32 * 7.0
+            };
             x -= w;
-            let r = Rect { x, y: 5.0, w, h: pill_h - 10.0 };
+            let r = Rect {
+                x,
+                y: 5.0,
+                w,
+                h: pill_h - 10.0,
+            };
             x -= 6.0;
             r
         })
@@ -452,24 +731,63 @@ pub struct WindowRegions {
     pub pin: Rect,
     pub opacity: Rect,
     pub minimize: Rect,
+    pub menu: Rect,
 }
 
 pub fn window_regions(tile: &Placed) -> WindowRegions {
     let (x, y, w, h) = (tile.x, tile.y, tile.w, tile.h);
     let b = 34.0;
     let by = y + (h - b) / 2.0;
-    let button = |i: f32| Rect { x: x + w - 12.0 - b - i * (b + 8.0), y: by, w: b, h: b };
-    let (minimize, opacity, pin) = (button(0.0), button(1.0), button(2.0));
+    let button = |i: f32| Rect {
+        x: x + w - 12.0 - b - i * (b + 8.0),
+        y: by,
+        w: b,
+        h: b,
+    };
+    let (menu, minimize, opacity, pin) = (button(0.0), button(1.0), button(2.0), button(3.0));
     let text_x = x + 64.0;
     let text_w = pin.x - 12.0 - text_x;
     WindowRegions {
-        icon: Rect { x: x + 12.0, y: y + (h - 40.0) / 2.0, w: 40.0, h: 40.0 },
-        name: Rect { x: text_x, y: y + 12.0, w: text_w, h: 20.0 },
-        title: Rect { x: text_x, y: y + 32.0, w: text_w, h: 18.0 },
+        icon: Rect {
+            x: x + 12.0,
+            y: y + (h - 40.0) / 2.0,
+            w: 40.0,
+            h: 40.0,
+        },
+        name: Rect {
+            x: text_x,
+            y: y + 12.0,
+            w: text_w,
+            h: 20.0,
+        },
+        title: Rect {
+            x: text_x,
+            y: y + 32.0,
+            w: text_w,
+            h: 18.0,
+        },
         pin,
         opacity,
         minimize,
+        menu,
     }
+}
+
+pub fn window_hit(tile: &Placed, x: f32, y: f32) -> Option<Hit> {
+    if !tile.contains(x, y) {
+        return None;
+    }
+    let r = window_regions(tile);
+    [
+        (r.pin, Hit::WinPin),
+        (r.opacity, Hit::WinOpacity),
+        (r.minimize, Hit::WinMinimize),
+        (r.menu, Hit::WinMenu),
+    ]
+    .into_iter()
+    .find(|(r, _)| r.contains(x, y))
+    .map(|(_, h)| h)
+    .or(Some(Hit::WinActivate))
 }
 
 pub const CLIP_ROW_H: f32 = 30.0;
@@ -479,7 +797,12 @@ const CLIP_TOP: f32 = 34.0;
 pub fn clip_rows(tile: &Placed) -> Vec<Rect> {
     let fit = ((tile.h - CLIP_TOP - 6.0) / CLIP_ROW_H).floor().max(0.0) as usize;
     (0..fit)
-        .map(|i| Rect { x: tile.x + 6.0, y: tile.y + CLIP_TOP + i as f32 * CLIP_ROW_H, w: tile.w - 12.0, h: CLIP_ROW_H })
+        .map(|i| Rect {
+            x: tile.x + 6.0,
+            y: tile.y + CLIP_TOP + i as f32 * CLIP_ROW_H,
+            w: tile.w - 12.0,
+            h: CLIP_ROW_H,
+        })
         .collect()
 }
 
@@ -491,7 +814,12 @@ pub fn dock_slots(tile: &Placed, n: usize) -> (Vec<Rect>, Rect) {
     let step = DOCK_ICON + DOCK_GAP;
     let fit = (((tile.w - 28.0 - DOCK_ICON) / step).floor().max(0.0) as usize).min(n);
     let y = tile.y + (tile.h - DOCK_ICON) / 2.0;
-    let slot = |i: usize| Rect { x: tile.x + 14.0 + i as f32 * step, y, w: DOCK_ICON, h: DOCK_ICON };
+    let slot = |i: usize| Rect {
+        x: tile.x + 14.0 + i as f32 * step,
+        y,
+        w: DOCK_ICON,
+        h: DOCK_ICON,
+    };
     ((0..fit).map(slot).collect(), slot(fit))
 }
 
@@ -547,12 +875,32 @@ mod tests {
         let (tiles, _) = pack(&[Media, Clipboard], 560.0);
         let t = tiles[0];
         let r = media_regions(&t);
-        for part in [r.cover, r.title, r.artist, r.prev, r.play, r.next, r.progress, r.times, r.speaker, r.volume] {
-            assert!(part.x >= t.x && part.x + part.w <= t.x + t.w + 0.01, "{part:?} outside {t:?}");
-            assert!(part.y >= t.y && part.y + part.h <= t.y + t.h + 0.01, "{part:?} outside {t:?}");
+        for part in [
+            r.cover,
+            r.title,
+            r.artist,
+            r.prev,
+            r.play,
+            r.next,
+            r.like,
+            r.progress,
+            r.progress_hit,
+            r.times,
+            r.speaker,
+            r.volume,
+        ] {
+            assert!(
+                part.x >= t.x && part.x + part.w <= t.x + t.w + 0.01,
+                "{part:?} outside {t:?}"
+            );
+            assert!(
+                part.y >= t.y && part.y + part.h <= t.y + t.h + 0.01,
+                "{part:?} outside {t:?}"
+            );
         }
         // Buttons do not overlap each other.
         assert!(r.prev.x + r.prev.w <= r.play.x && r.play.x + r.play.w <= r.next.x);
+        assert!(r.next.x + r.next.w <= r.like.x);
     }
 
     #[test]
@@ -562,7 +910,17 @@ mod tests {
         assert_eq!(rows.len(), 3);
         let last = rows.last().unwrap();
         assert!(last.y + last.h <= tiles[1].y + tiles[1].h);
-        assert_eq!(clip_rows(&Placed { kind: Clipboard, x: 0.0, y: 0.0, w: 100.0, h: 30.0 }).len(), 0);
+        assert_eq!(
+            clip_rows(&Placed {
+                kind: Clipboard,
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 30.0
+            })
+            .len(),
+            0
+        );
     }
 
     #[test]
@@ -585,7 +943,31 @@ mod tests {
         assert!(r.name.x + r.name.w <= r.pin.x);
         assert!(r.pin.x + r.pin.w <= r.opacity.x);
         assert!(r.opacity.x + r.opacity.w <= r.minimize.x);
-        assert!(r.minimize.x + r.minimize.w <= tiles[0].x + tiles[0].w);
+        assert!(r.minimize.x + r.minimize.w <= r.menu.x);
+        assert!(r.menu.x + r.menu.w <= tiles[0].x + tiles[0].w);
+    }
+
+    #[test]
+    fn window_card_buttons_and_body_have_distinct_actions() {
+        let (tiles, _) = pack(&[Window], 560.0);
+        let tile = &tiles[0];
+        let r = window_regions(tile);
+        for (rect, hit) in [
+            (r.pin, Hit::WinPin),
+            (r.opacity, Hit::WinOpacity),
+            (r.minimize, Hit::WinMinimize),
+            (r.menu, Hit::WinMenu),
+        ] {
+            assert_eq!(
+                window_hit(tile, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+                Some(hit)
+            );
+        }
+        assert_eq!(
+            window_hit(tile, r.name.x + 2.0, r.name.y + 2.0),
+            Some(Hit::WinActivate)
+        );
+        assert_eq!(window_hit(tile, tile.x - 1.0, tile.y), None);
     }
 
     #[test]
@@ -644,7 +1026,12 @@ mod tests {
 
     #[test]
     fn volume_track_maps_to_0_1() {
-        let track = Rect { x: 10.0, y: 0.0, w: 100.0, h: 4.0 };
+        let track = Rect {
+            x: 10.0,
+            y: 0.0,
+            w: 100.0,
+            h: 4.0,
+        };
         assert_eq!(volume_at(&track, 10.0), 0.0);
         assert_eq!(volume_at(&track, 60.0), 0.5);
         assert_eq!(volume_at(&track, 500.0), 1.0);

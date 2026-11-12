@@ -188,6 +188,7 @@ pub struct WindowView {
     pub topmost: bool,
     /// 100 = opaque.
     pub opacity: u32,
+    pub notice: bool,
 }
 
 /// The round badge at the left of a notice.
@@ -254,6 +255,9 @@ pub struct MediaView {
     pub can_next: bool,
     /// Current lyric line, shown under the progress bar.
     pub lyric: Option<String>,
+    pub liked: Option<bool>,
+    pub like_busy: bool,
+    pub message: String,
 }
 
 /// Contents of the collapsed island: weather icon, clock, temperature.
@@ -1018,7 +1022,14 @@ impl Renderer {
         self.paint_cover(&px(r.cover), 10.0 * k, th);
         let title = if media.title.is_empty() { "Без названия" } else { &media.title };
         text(title, &fonts.track_title, r.title, th.text);
-        text(&media.artist, &fonts.track_artist, r.artist, th.subtext);
+        let secondary=if !media.message.is_empty(){media.message.as_str()}else {match hot {
+            Some(Hit::MediaLike) if media.liked==Some(true)=>"Снять лайк в Яндекс Музыке",
+            Some(Hit::MediaLike)=>"Нравится в Яндекс Музыке",
+            Some(Hit::MediaCopy)=>"Нажмите, чтобы скопировать название",
+            Some(Hit::MediaSeek)=>"Нажмите для перемотки",
+            _=>media.artist.as_str(),
+        }};
+        text(secondary, &fonts.track_artist, r.artist, th.subtext);
 
         let dim = |on: bool| if on { th.text } else { th.subtext };
         for (hit, rc) in [(Hit::MediaPrev, r.prev), (Hit::MediaPlay, r.play), (Hit::MediaNext, r.next)] {
@@ -1030,6 +1041,15 @@ impl Renderer {
         self.paint_transport(Transport::Prev, px(r.prev), k, dim(media.can_prev));
         self.paint_transport(if media.playing { Transport::Pause } else { Transport::Play }, px(r.play), k, th.text);
         self.paint_transport(Transport::Next, px(r.next), k, dim(media.can_next));
+        let heart=px(r.like);
+        let (hx,hy)=((heart.left+heart.right)/2.0,(heart.top+heart.bottom)/2.0);
+        if hot==Some(Hit::MediaLike) {self.fill_circle(th.tile_hover,hx,hy,15.0*k);}
+        let ink=if media.like_busy {th.subtext}else if media.liked==Some(true){th.accent}else{th.text};
+        let points:Vec<_>=(0..32).map(|i|{
+            let t=i as f32*TAU/32.0;
+            (hx+0.52*k*16.0*t.sin().powi(3),hy-0.52*k*(13.0*t.cos()-5.0*(2.0*t).cos()-2.0*(3.0*t).cos()-(4.0*t).cos()))
+        }).collect();
+        if media.liked==Some(true) {self.fill_polygon(ink,&points);}else {for i in 0..points.len(){let a=points[i];let b=points[(i+1)%points.len()];self.line(ink,a.0,a.1,b.0,b.1,1.4*k);}}
 
         let mut track = th.text;
         track[3] = 0.18;
@@ -1319,13 +1339,22 @@ impl Renderer {
             let n: Vec<u16> = win.name.encode_utf16().collect();
             self.dc.DrawText(&n, &fonts.track_title, &px(r.name), &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             self.brush.SetColor(&color(th.subtext, 1.0));
-            let t: Vec<u16> = win.title.encode_utf16().collect();
+            let detail=if win.notice {win.title.clone()}else{match scene.hot {
+                Some(Hit::WinPin)=>if win.topmost {"Снять закрепление поверх окон".into()}else{"Закрепить поверх всех окон".into()},
+                Some(Hit::WinOpacity)=>format!("Непрозрачность: {}% · нажмите для изменения",win.opacity),
+                Some(Hit::WinMinimize)=>"Свернуть окно".into(),
+                Some(Hit::WinMenu)=>"Действия с окном".into(),
+                Some(Hit::WinActivate)=>"Нажмите, чтобы вернуться к приложению".into(),
+                _=>win.title.clone(),
+            }};
+            let t: Vec<u16> = detail.encode_utf16().collect();
             self.dc.DrawText(&t, &fonts.track_artist, &px(r.title), &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         }
         for (hit, rc, active) in [
             (Hit::WinPin, r.pin, win.topmost),
             (Hit::WinOpacity, r.opacity, win.opacity < 100),
             (Hit::WinMinimize, r.minimize, false),
+            (Hit::WinMenu, r.menu, false),
         ] {
             let b = px(rc);
             let fill = if active { th.accent } else if scene.hot == Some(hit) { th.tile_hover } else { th.tile };
@@ -1348,6 +1377,7 @@ impl Renderer {
                     }
                     self.fill_polygon(ink, &[(cx, cy - 6.0 * k), (cx + 4.3 * k, cy - 4.2 * k), (cx + 6.0 * k, cy), (cx + 4.3 * k, cy + 4.2 * k), (cx, cy + 6.0 * k)]);
                 }
+                Hit::WinMenu => {for offset in [-5.0,0.0,5.0]{self.fill_circle(ink,cx+offset*k,cy,1.4*k);}},
                 _ => self.line(ink, cx - 6.0 * k, cy + 3.0 * k, cx + 6.0 * k, cy + 3.0 * k, 1.8 * k),
             }
         }

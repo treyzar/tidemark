@@ -51,6 +51,7 @@ pub struct MediaState {
     pub sampled_at: Instant,
     pub can_prev: bool,
     pub can_next: bool,
+    pub can_seek: bool,
     pub cover: Option<Cover>,
     /// Volume of the player's own audio session, 0..1, if found.
     pub volume: Option<f32>,
@@ -69,6 +70,12 @@ pub enum Command {
     Prev,
     SetVolume(f32),
     Refresh,
+    SeekTo{position:Duration,title:String,artist:String},
+}
+
+pub fn seek_position(duration:Duration,ratio:f32)->Duration {
+    let ratio=if ratio.is_finite(){ratio.clamp(0.0,1.0)}else{0.0};
+    Duration::from_secs_f64(duration.as_secs_f64()*ratio as f64)
 }
 
 pub struct Service {
@@ -164,6 +171,17 @@ impl Worker {
         let player = self.last.as_ref().map(|s| s.player);
         match (cmd, player) {
             (Command::Refresh, _) => {}
+            (Command::SeekTo{position,title,artist},Some(Player::Smtc))=>{
+                if let Some((session,_))=&self.session {
+                    if let Ok(props)=session.TryGetMediaPropertiesAsync().and_then(|p|p.get()) {
+                        if props.Title().is_ok_and(|t|t.to_string()==title)&&props.Artist().is_ok_and(|a|a.to_string()==artist) {
+                            let ticks=position.as_nanos().saturating_div(100).min(i64::MAX as u128) as i64;
+                            let _=session.TryChangePlaybackPositionAsync(ticks).and_then(|p|p.get());
+                        }
+                    }
+                }
+            },
+            (Command::SeekTo{..},_)=>{},
             (Command::SetVolume(v), Some(Player::Smtc)) => {
                 if let Some(s) = &self.last {
                     audio::set_app_volume(&s.app_id, v);
@@ -276,6 +294,7 @@ impl Worker {
             sampled_at: Instant::now(),
             can_prev: controls.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(true),
             can_next: controls.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(true),
+            can_seek:controls.as_ref().and_then(|c|c.IsPlaybackPositionEnabled().ok()).unwrap_or(false),
             cover,
         })
     }
@@ -316,6 +335,7 @@ fn same_view(a: &MediaState, b: &MediaState) -> bool {
         && a.duration == b.duration
         && a.can_prev == b.can_prev
         && a.can_next == b.can_next
+        && a.can_seek == b.can_seek
         && a.cover.as_ref().map(|c| c.id) == b.cover.as_ref().map(|c| c.id)
         && a.volume.map(|v| (v * 100.0).round()) == b.volume.map(|v| (v * 100.0).round())
         && drift < Duration::from_secs(2)
@@ -377,6 +397,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seek_clamps_to_track_and_ignores_non_finite_pointer_input() {
+        let d=Duration::from_secs(200);
+        assert_eq!(seek_position(d,0.5),Duration::from_secs(100));
+        assert_eq!(seek_position(d,-1.0),Duration::ZERO);assert_eq!(seek_position(d,2.0),d);
+        assert_eq!(seek_position(d,f32::NAN),Duration::ZERO);assert_eq!(seek_position(Duration::ZERO,1.0),Duration::ZERO);
+    }
+
+    #[test]
+    fn seek_capability_only_changes_are_visible_updates() {
+        let a=state(false,0);let mut b=a.clone();b.can_seek=!a.can_seek;
+        assert!(!same_view(&a,&b));
+    }
+
+    #[test]
     fn time_format() {
         assert_eq!(format_time(Duration::from_secs(0)), "0:00");
         assert_eq!(format_time(Duration::from_secs(187)), "3:07");
@@ -395,6 +429,7 @@ mod tests {
             sampled_at: Instant::now(),
             can_prev: true,
             can_next: true,
+            can_seek:true,
             cover: None,
             volume: Some(0.5),
         }

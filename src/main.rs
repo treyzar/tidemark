@@ -39,6 +39,7 @@ mod timer;
 mod translate;
 mod tray;
 mod weather;
+mod yandex_music;
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, LPARAM, WPARAM};
@@ -84,6 +85,7 @@ fn run_loop() {
     let mut msg = MSG::default();
     unsafe {
         loop {
+            island::poll_completed_actions();
             if island::is_animating() {
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
