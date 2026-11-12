@@ -19,12 +19,14 @@ version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/linux/Cargo.
     exit 1
 }
 cargo build --release --locked --manifest-path apps/linux/Cargo.toml
+cargo build --release --locked --manifest-path crates/tidemark-agent/Cargo.toml --bin island-hook
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/tidemark-deb.XXXXXXXX")
 cleanup() { rm -rf -- "$stage"; }
 trap cleanup EXIT
 mkdir -p -- "$stage/DEBIAN" "$root/dist"
 install -Dm755 apps/linux/target/release/tidemark "$stage/usr/bin/tidemark"
+install -Dm755 crates/tidemark-agent/target/release/island-hook "$stage/usr/bin/island-hook"
 install -Dm644 installer/linux/io.github.treyzar.Tidemark.desktop \
     "$stage/usr/share/applications/io.github.treyzar.Tidemark.desktop"
 desktop-file-validate "$stage/usr/share/applications/io.github.treyzar.Tidemark.desktop"
