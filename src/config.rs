@@ -81,7 +81,7 @@ impl Default for Config {
             expanded_radius: 28.0,
             top_offset: 8.0,
             theme: "system".into(),
-            accent: "#7C6CF2".into(),
+            accent: "#A54831".into(),
             background: String::new(),
             opacity: 1.0,
             home_tiles: DEFAULT_TILES.map(String::from).to_vec(),
@@ -95,7 +95,7 @@ impl Default for Config {
             osd: true,
             privacy_indicator: true,
             launcher: true,
-            search_url: "https://yandex.ru/search/?text={q}".into(),
+            search_url: "https://www.google.com/search?q={q}".into(),
             dock_apps: None,
             gpu: false,
         }
@@ -114,6 +114,9 @@ impl Config {
 
     /// Brings configs written by older versions up to date.
     fn upgrade(mut self) -> Self {
+        if self.search_url=="https://yandex.ru/search/?text={q}" {
+            self.search_url=Self::default().search_url;
+        }
         if self.home_tiles == OLDEST_DEFAULT_TILES.map(String::from) || OLD_DEFAULT_TILES.iter().any(|d| self.home_tiles == d.map(String::from)) {
             self.home_tiles = DEFAULT_TILES.map(String::from).to_vec();
         }
@@ -155,6 +158,15 @@ pub fn parse_hex(s: &str) -> Option<[f32; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_is_used_for_new_and_legacy_default_search() {
+        assert_eq!(Config::default().search_url, "https://www.google.com/search?q={q}");
+        let legacy: Config=toml::from_str("search_url = 'https://yandex.ru/search/?text={q}'").unwrap();
+        assert_eq!(legacy.upgrade().search_url,Config::default().search_url);
+        let custom: Config=toml::from_str("search_url = 'https://example.com/find?q={q}'").unwrap();
+        assert_eq!(custom.upgrade().search_url,"https://example.com/find?q={q}");
+    }
 
     #[test]
     fn hex_parsing() {

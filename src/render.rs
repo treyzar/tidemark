@@ -60,8 +60,6 @@ pub struct Scene<'a> {
     pub media: Option<&'a MediaView>,
     /// Cover art pixels for `media` / `compact.media`.
     pub cover: Option<&'a Cover>,
-    /// Only the liquid edge is moving: ~30 fps is enough and halves the cost.
-    pub relaxed: bool,
     /// Newest clipboard history rows.
     pub clip_rows: &'a [ClipRow],
     pub dock: &'a [DockIcon],
@@ -131,6 +129,12 @@ pub struct TextView {
     pub stats: String,
     pub status: String,
     pub busy: bool,
+}
+
+impl Default for TextView {
+    fn default()->Self {
+        Self {field:TextField::new(true),focus:false,stats:crate::text_tools::stats(""),status:String::new(),busy:false}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,8 +377,7 @@ pub struct Renderer {
     _comp_target: IDCompositionTarget,
     _visual: IDCompositionVisual,
     size: (u32, u32),
-    /// Vblanks per presented frame; keeps animations near 60 fps on
-    /// high-refresh monitors (144 Hz -> every 2nd vblank).
+    /// Vblanks per presented frame (1 up to 120 Hz).
     sync_interval: u32,
 }
 
@@ -419,9 +422,10 @@ fn refresh_rate() -> u32 {
     if ok && mode.dmDisplayFrequency > 1 { mode.dmDisplayFrequency } else { 60 }
 }
 
-/// Vblanks to wait per frame so animations run at roughly 60 fps.
+/// Vblanks to wait per frame: every vblank up to 120 Hz (60-120 fps),
+/// every 2nd or later above that, so a 240 Hz panel still gets 120 fps.
 pub fn sync_interval_for(refresh_hz: u32) -> u32 {
-    ((refresh_hz as f32 / 60.0).round() as u32).clamp(1, 4)
+    (refresh_hz / 120).clamp(1, 4)
 }
 
 fn color(c: Rgba, alpha: f32) -> D2D1_COLOR_F {
@@ -736,8 +740,7 @@ impl Renderer {
             self.paint_privacy(scene);
 
             dc.EndDraw(None, None)?;
-            let interval = if scene.relaxed { (self.sync_interval * 2).min(4) } else { self.sync_interval };
-            self.swap_chain.Present(interval, DXGI_PRESENT(0)).ok()?;
+            self.swap_chain.Present(self.sync_interval, DXGI_PRESENT(0)).ok()?;
         }
         Ok(rebuilt)
     }
@@ -2169,13 +2172,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_pacing_targets_60fps() {
-        assert_eq!(sync_interval_for(60), 1);
-        assert_eq!(sync_interval_for(75), 1);
-        assert_eq!(sync_interval_for(120), 2);
-        assert_eq!(sync_interval_for(144), 2);
-        assert_eq!(sync_interval_for(240), 4);
+    fn fresh_text_tab_is_ready_before_focus_or_input() {
+        let view=TextView::default();
+        assert!(view.field.multiline);
+        assert!(view.field.is_empty());
+        assert_eq!(view.stats,crate::text_tools::stats(""));
+        assert!(!view.focus && !view.busy);
+    }
+
+    #[test]
+    fn frames_follow_the_refresh_rate() {
         assert_eq!(sync_interval_for(30), 1);
+        assert_eq!(sync_interval_for(60), 1);
+        assert_eq!(sync_interval_for(99), 1);
+        assert_eq!(sync_interval_for(144), 1);
+        assert_eq!(sync_interval_for(240), 2);
     }
 
     #[test]

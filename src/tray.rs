@@ -12,10 +12,12 @@ const ID_AUTOSTART: usize = 1;
 const ID_EXIT: usize = 2;
 const ID_OPEN_CONFIG: usize = 3;
 const ID_RELOAD: usize = 4;
+const ID_SETTINGS: usize = 5;
 
 pub enum TrayAction {
     None,
     Reload,
+    Settings,
     Exit,
 }
 
@@ -26,10 +28,10 @@ fn data(hwnd: HWND) -> NOTIFYICONDATAW {
         uID: 1,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() },
+        hIcon: crate::brand::icon(),
         ..Default::default()
     };
-    for (dst, src) in nid.szTip.iter_mut().zip("Win Island".encode_utf16()) {
+    for (dst, src) in nid.szTip.iter_mut().zip("Tidemark".encode_utf16()) {
         *dst = src;
     }
     nid
@@ -65,8 +67,9 @@ pub fn on_message(hwnd: HWND, event: u32) -> TrayAction {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return TrayAction::None };
         let auto_flags = if autostart::is_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("Открыть настройки"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Перечитать настройки"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Настройки…"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("Открыть config.toml"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Перечитать config.toml"));
         let _ = AppendMenuW(menu, auto_flags, ID_AUTOSTART, w!("Запускать вместе с Windows"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("Выход"));
@@ -87,6 +90,7 @@ pub fn on_message(hwnd: HWND, event: u32) -> TrayAction {
                 open_config();
                 TrayAction::None
             }
+            ID_SETTINGS => TrayAction::Settings,
             ID_RELOAD => TrayAction::Reload,
             ID_EXIT => TrayAction::Exit,
             _ => TrayAction::None,

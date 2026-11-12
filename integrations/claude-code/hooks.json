@@ -1,16 +1,16 @@
 {
   "hooks": {
     "PermissionRequest": [
-      { "hooks": [{ "type": "command", "command": "C:/Users/ivan/Documents/win-island/target/release/island-hook.exe", "timeout": 60 }] }
+      { "hooks": [{ "type": "command", "command": "@HOOK@", "timeout": 60 }] }
     ],
     "PreToolUse": [
-      { "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "C:/Users/ivan/Documents/win-island/target/release/island-hook.exe", "timeout": 60 }] }
+      { "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "@HOOK@", "timeout": 60 }] }
     ],
     "Notification": [
-      { "hooks": [{ "type": "command", "command": "C:/Users/ivan/Documents/win-island/target/release/island-hook.exe", "timeout": 10 }] }
+      { "hooks": [{ "type": "command", "command": "@HOOK@", "timeout": 10 }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "C:/Users/ivan/Documents/win-island/target/release/island-hook.exe", "timeout": 10 }] }
+      { "hooks": [{ "type": "command", "command": "@HOOK@", "timeout": 10 }] }
     ]
   }
 }

@@ -6,6 +6,7 @@ mod anim;
 mod audio;
 mod autostart;
 mod beat;
+mod brand;
 mod capture;
 mod clip_history;
 mod clipboard;
@@ -26,6 +27,7 @@ mod privacy;
 mod recognize;
 mod record;
 mod render;
+mod settings;
 mod shelf;
 mod signals;
 mod stats;
@@ -39,7 +41,7 @@ mod tray;
 mod weather;
 
 use windows::core::w;
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, LPARAM, WPARAM};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -49,6 +51,12 @@ fn main() {
         // One island per user session.
         let _mutex = CreateMutexW(None, true, w!("Local\\WinIsland.Singleton"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            // `win-island --settings` asks the running island to open its settings.
+            if open_settings_requested() {
+                if let Ok(running) = FindWindowW(w!("WinIslandWindow"), None) {
+                    let _ = PostMessageW(Some(running), settings::WM_OPEN_SETTINGS, WPARAM(0), LPARAM(0));
+                }
+            }
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -57,11 +65,17 @@ fn main() {
         let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
 
+    autostart::refresh();
     let cfg = config::Config::load();
-    if island::create(cfg).is_err() {
-        return;
+    let Ok(hwnd) = island::create(cfg) else { return };
+    if open_settings_requested() {
+        settings::open(hwnd);
     }
     run_loop();
+}
+
+fn open_settings_requested() -> bool {
+    std::env::args().any(|a| a == "--settings")
 }
 
 /// Sleeps in `GetMessageW` while the island is still; while it animates,
@@ -75,6 +89,9 @@ fn run_loop() {
                     if msg.message == WM_QUIT {
                         return;
                     }
+                    if settings::is_dialog_message(&msg) {
+                        continue;
+                    }
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -82,6 +99,9 @@ fn run_loop() {
             } else {
                 if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
                     return;
+                }
+                if settings::is_dialog_message(&msg) {
+                    continue;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

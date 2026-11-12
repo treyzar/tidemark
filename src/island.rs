@@ -229,7 +229,7 @@ pub struct Island {
     /// The Text tab's contents.
     text: TextField,
     text_status: String,
-    text_view: Option<TextView>,
+    text_view: TextView,
     ocr_slot: Arc<Mutex<Option<String>>>,
     translate_slot: Arc<Mutex<Option<Option<String>>>>,
     translating: bool,
@@ -334,7 +334,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
             w!("WinIslandWindow"),
-            w!("Win Island"),
+            w!("Tidemark"),
             WS_POPUP,
             0,
             0,
@@ -423,7 +423,7 @@ pub fn create(cfg: Config) -> Result<HWND> {
             shelf_press: None,
             text: TextField::new(true),
             text_status: String::new(),
-            text_view: None,
+            text_view: TextView::default(),
             ocr_slot: Arc::new(Mutex::new(None)),
             translate_slot: Arc::new(Mutex::new(None)),
             translating: false,
@@ -1777,8 +1777,8 @@ impl Island {
             status: self.text_status.clone(),
             busy: self.translating,
         };
-        if Some(&view) != self.text_view.as_ref() {
-            self.text_view = Some(view);
+        if view != self.text_view {
+            self.text_view = view;
             self.dirty = true;
         }
     }
@@ -2754,7 +2754,6 @@ impl Island {
             compact_size: (self.collapsed_width(), self.cfg.collapsed_height),
             media: self.media_view.as_ref(),
             cover: self.media.as_ref().and_then(|m| m.cover.as_ref()),
-            relaxed: self.width.is_settled() && self.height.is_settled() && self.radius.is_settled(),
             clip_rows: &self.clip_rows,
             dock: &self.dock_icons,
             hot: self.hot,
@@ -2769,7 +2768,7 @@ impl Island {
             clip_page: &self.clip_page,
             search: self.search_view.as_ref(),
             shelf: &self.shelf_rows,
-            text: self.text_view.as_ref(),
+            text: Some(&self.text_view),
             control: self.ctl_view.as_ref(),
             recording: self.recording.is_some(),
         };
@@ -3260,8 +3259,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 TrayAction::Reload => {
                     with_island(|i| i.reload(Config::load()));
                 }
+                TrayAction::Settings => crate::settings::open(hwnd),
                 TrayAction::None => {}
             }
+            return LRESULT(0);
+        }
+        crate::settings::WM_OPEN_SETTINGS => {
+            crate::settings::open(hwnd);
+            return LRESULT(0);
+        }
+        crate::settings::WM_SETTINGS_APPLIED => {
+            with_island(|i| i.reload(Config::load()));
             return LRESULT(0);
         }
         WM_DESTROY => {

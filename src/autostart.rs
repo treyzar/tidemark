@@ -37,3 +37,11 @@ pub fn set_enabled(enable: bool) {
         let _ = RegCloseKey(key);
     }
 }
+
+/// Re-registers autostart with the current exe path, so moving or updating
+/// the program does not leave a stale entry.
+pub fn refresh() {
+    if is_enabled() {
+        set_enabled(true);
+    }
+}

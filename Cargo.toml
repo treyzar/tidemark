@@ -1,8 +1,8 @@
 [package]
 name = "win-island"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
-description = "Dynamic Island for Windows 11"
+description = "Tidemark — desktop island for Windows"
 
 [dependencies]
 windows-numerics = "0.2"
@@ -77,6 +77,8 @@ features = [
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
