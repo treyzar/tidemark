@@ -159,6 +159,20 @@ impl Island {
         let handle = gtk::WindowHandle::new();
         handle.set_child(Some(&root));
         window.set_content(Some(&handle));
+        // Adwaita/Wayland can initially allocate its natural 360×200 size
+        // despite builder defaults. Apply the same explicit compact request
+        // used by collapse(), before the first presentation.
+        {
+            let config = shared.config.borrow();
+            window.set_size_request(
+                config.collapsed_width as i32,
+                config.collapsed_height as i32,
+            );
+            window.set_default_size(
+                config.collapsed_width as i32,
+                config.collapsed_height as i32,
+            );
+        }
 
         let island = Rc::new(Self {
             window,
