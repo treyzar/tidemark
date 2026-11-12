@@ -57,3 +57,26 @@ jobs:
       - name: Test bridge logic and cross-language contract
         run: npm test --prefix gnome-extension
 
+  gnome-session:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TIDEMARK_HARNESS_ARTIFACT_DIR: ${{ runner.temp }}/tidemark-gnome-artifacts
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install an isolated GNOME test session
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-shell gjs gir1.2-gtk-4.0 dbus dbus-daemon dconf-service dconf-gsettings-backend dconf-cli libglib2.0-bin libgl1-mesa-dri mesa-vulkan-drivers
+      - name: Exercise the real compositor and authenticated bridge
+        run: CI=true bash gnome-extension/integration/run-headless.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: gnome-session-${{ matrix.os }}
+          path: ${{ runner.temp }}/tidemark-gnome-artifacts
+          if-no-files-found: warn

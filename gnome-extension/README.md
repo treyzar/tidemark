@@ -136,6 +136,59 @@ node --check gnome-extension/tidemark@treyzar.github.io/*.js   # syntax of every
 
 These tests cannot prove the GNOME calls themselves: `gnomePlatform.js` and `dbusService.js` only run inside gnome-shell.
 
+## Headless real-GNOME harness (Linux CI)
+
+`integration/run-headless.sh` runs the real extension inside a **private headless gnome-shell 46**. It uses Mutter's native backend: `--headless --wayland --no-x11 --virtual-monitor 1280x800 --wayland-display tidemark-test-0 --unsafe-mode`, flags checked in Mutter 46.0's `meta-context-main.c`.
+
+**Isolation:**
+- The shell runs on a private `dbus-run-session` bus, in its own process group, which is stopped as a group.
+- All writes go to a fresh harness root (`mktemp -d`, mode 700): `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` point inside it. `HOME` is not changed (on CI it is the runner's own ephemeral home), and nothing is written there.
+- gsettings (`enabled-extensions`, input sources `us`+`ru`) are written only to the root's dconf.
+- The outer part refuses to run unless `CI=true` or `TIDEMARK_HARNESS_ISOLATED_OK=1`.
+- The inner part (`--inner`) refuses unless it was started by the outer part, before any gsettings write. It checks:
+  - a one-time token from the root, consumed on use;
+  - that the root and XDG paths are validated, owned by the user and mode 700;
+  - that it runs on a session bus different from the caller's, on which `org.gnome.Shell` is not present.
+- The extension state is polled (up to 30 s) until it is ACTIVE, ERROR or OUT_OF_DATE.
+
+**How it drives the adapter:**
+- The adapter launches `integration/fixture-client.js` through the developer override `TIDEMARK_ADAPTER_CLIENT` (absolute path, executable).
+- The fixture calls `org.tidemark.Shell1` from that launched process, so it is authenticated by its real PID. Production authentication is unchanged.
+- `integration/victim.js` is a separate GTK 4 app window the adapter does not own.
+- Results are checked against Mutter itself through `org.gnome.Shell.Eval`, which only this private `--unsafe-mode` shell exposes. The extension state comes from `org.gnome.Shell.Extensions.GetExtensionInfo` (`state` 1 = ACTIVE).
+
+```sh
+sudo apt-get install -y --no-install-recommends gnome-shell gjs gir1.2-gtk-4.0 dbus dbus-daemon   dconf-service dconf-gsettings-backend dconf-cli libglib2.0-bin libgl1-mesa-dri mesa-vulkan-drivers
+CI=true TIDEMARK_HARNESS_ARTIFACT_DIR="$PWD/gnome-harness-artifacts"   bash gnome-extension/integration/run-headless.sh    # 0 = required checks passed, 1 = a check failed, 2 = refused
+# The artifact dir receives results-*.txt, phase1.json and gnome-shell.log (harness files only).
+```
+
+| Area | Check |
+|---|---|
+| Harness | extension ACTIVE; `org.tidemark.Shell` owned; `Version` open; foreign `gdbus` caller gets `AccessDenied`; no extension JS errors in the shell log |
+| Phase 1 (launched PID) | open properties before `Hello` (`ClientState` `starting`); `Hello` → `running` with snapshot `FocusChanged({})` = None, `CapsLock`, `MaximizedTopChanged` |
+| Island | Mutter frame is top-centred below the panel; above, sticky, skip-taskbar |
+| Place | unknown role → `InvalidArgs` |
+| Focus | `FocusChanged` for the victim with serde keys, `(iiii)` rect and the victim's real PID; `GetFocus` agrees |
+| Window actions | `set_above`, `set_opacity` (and the floor), `tile_left` (Mutter frame = left half of the work area), `toggle_maximize` + `MaximizedTopChanged`, minimize/activate; actions on the island refused |
+| Clipboard | text round trip through `Meta.Selection`; password hint → `([], true)` and unreadable; `SetClipboard` > 64 MiB → `InvalidArgs`; Screenshot → `Unsupported`/`screenshot` |
+| Shortcuts | defaults grabbed, `<Alt>space` reported taken |
+| Crash | the victim is dimmed to 179, then the fixture exits with status 3 |
+| Phase 2 (restarted PID) | the new PID is authenticated after `Hello` (`starting` → `running`); the victim's opacity is back to 255 |
+| `[optional]` (reported, fatal only with `TIDEMARK_HARNESS_STRICT=1`) | a > 64 MiB clipboard offered by the victim is refused by the bounded read (needs the victim to own the Wayland selection); Super+Alt+Space, Caps Lock and the input-source switch via a Clutter virtual keyboard |
+
+**What the harness cannot show:**
+- **Status:** it has not been run yet. It was written on Windows; only `bash -n`, `node --check` and the static tests in `tests/integration-files.test.js` ran.
+- **Expected first-run friction:** headless GL/llvmpipe, dconf activation, the startup overview, and Wayland selection rules for the victim.
+- **Not covered at all:**
+  - GNOME 50 (Ubuntu 26.04) and the Xorg session;
+  - real input focus behaviour when clicking the island;
+  - multi-monitor and scale changes;
+  - lock-screen re-adoption;
+  - the single-instance `blocked`/handover flow with a real GApplication.
+
+  These stay in the manual acceptance list below.
+
 ## Real GNOME acceptance (to be run; not done yet)
 
 On fresh Ubuntu 24.04 (GNOME 46, Wayland **and** Xorg) and 26.04 (GNOME 50, Wayland) VMs, with `/usr/bin/tidemark` installed:

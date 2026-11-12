@@ -60,3 +60,17 @@
 - [x] `npm test --prefix gnome-extension` passes (Windows, Node 24); `node --check` on every module.
 - [x] `gnome-extension/README.md`: contract, access rules, startup and handover protocol, real GNOME acceptance steps, limits.
 - [ ] Real GNOME acceptance on 24.04 (Wayland + Xorg) and 26.04: **not run**; owned by QA/parent.
+
+### Task 5: Headless real-GNOME harness (Linux CI)
+- [x] Confirm the flags in Mutter 46.0 `meta-context-main.c`: `--headless`, `--virtual-monitor WxH`, `--no-x11`, `--wayland-display`, hidden `--unsafe-mode`. Confirm in gnome-shell 46.0 `shellDBus.js` that Eval is gated only by unsafe mode with `Main`/`Meta`/`GLib` in scope, and that `GetExtensionInfo` has state ACTIVE = 1.
+- [x] `integration/run-headless.sh`: private bus, HOME and XDG; guard (`CI`/`TIDEMARK_HARNESS_ISOLATED_OK`); private gsettings; developer-override client; harness-side open, denied and extension-state checks; result gate (`[optional]` checks only with STRICT).
+- [x] `integration/fixture-client.js` (authenticated by the launched PID; Eval oracle; crash → phase 2) and `integration/victim.js`.
+- [x] `tests/integration-files.test.js`: the scripts parse, shebangs and LF endings, isolation flags, no gsettings writes outside the private session. `.gitattributes` keeps LF.
+- [ ] First run on `ubuntu-24.04` CI (parent wires the job and apt packages); fix environment friction from real logs.
+- [x] Review fixes:
+  - the `--inner` guard (one-time token, validated private root/XDG paths, private bus without `org.gnome.Shell`) runs before any gsettings write;
+  - `HOME` is untouched;
+  - `TIDEMARK_HARNESS_*` names;
+  - process-group cleanup, no `pkill`;
+  - polled extension state;
+  - `TIDEMARK_HARNESS_ARTIFACT_DIR`.
