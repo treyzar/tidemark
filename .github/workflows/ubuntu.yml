@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ubuntu-port-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 # This checks the port's shared logic and transport adapters. It does not
 # publish a Linux release or stand in for the GNOME desktop acceptance tests.
 jobs:
@@ -65,7 +69,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
-      TIDEMARK_HARNESS_ARTIFACT_DIR: ${{ runner.temp }}/tidemark-gnome-artifacts
+      TIDEMARK_HARNESS_ARTIFACT_DIR: ${{ github.workspace }}/gnome-harness-artifacts
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Install an isolated GNOME test session
@@ -78,5 +82,5 @@ jobs:
         if: always()
         with:
           name: gnome-session-${{ matrix.os }}
-          path: ${{ runner.temp }}/tidemark-gnome-artifacts
+          path: gnome-harness-artifacts
           if-no-files-found: warn
