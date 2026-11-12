@@ -48,3 +48,12 @@ jobs:
           workspaces: crates/tidemark-mpris -> target
       - name: Test MPRIS adapter on an isolated session bus
         run: dbus-run-session -- cargo test --manifest-path crates/tidemark-mpris/Cargo.toml --locked
+
+  gnome-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test bridge logic and cross-language contract
+        run: npm test --prefix gnome-extension
+

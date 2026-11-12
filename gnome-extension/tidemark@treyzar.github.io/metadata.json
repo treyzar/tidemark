@@ -1,0 +1,8 @@
+{
+  "uuid": "tidemark@treyzar.github.io",
+  "name": "Tidemark",
+  "description": "Desktop integration for the Tidemark island: keeps it above other windows below the top bar, and gives it the active window, fullscreen state, window actions, global shortcuts, clipboard and keyboard layout. Launches /usr/bin/tidemark.",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "url": "https://github.com/treyzar/tidemark",
+  "version-name": "0.1.0"
+}

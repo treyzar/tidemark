@@ -1,0 +1,9 @@
+{
+  "name": "tidemark-gnome-adapter-tests",
+  "private": true,
+  "type": "module",
+  "description": "Syntax and contract tests for the Tidemark GNOME Shell adapter. Not shipped; the extension is the tidemark@treyzar.github.io folder.",
+  "scripts": {
+    "test": "node --test"
+  }
+}
